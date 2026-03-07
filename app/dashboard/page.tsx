@@ -2,111 +2,54 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { supabase } from "@/lib/supabase";
+import DashboardShell from "@/components/dashboard/shell";
 import {
+  loadDashboardData,
+  formatDate,
+  formatMoney,
+  getDaysUntil,
+  getExpectedPaycheck,
+  Budget,
+  Bill,
+  Expense,
+  RecurringBill,
+} from "@/lib/dashboard-data";
+import {
+  ResponsiveContainer,
   BarChart,
   Bar,
   XAxis,
   YAxis,
   Tooltip,
-  ResponsiveContainer,
+  CartesianGrid,
+  Cell,
 } from "recharts";
 
-type Budget = {
-  balance: number;
-  paycheck: number;
-  next_payday: string;
-};
-
-type Bill = {
-  id: string;
-  name: string;
-  amount: number;
-  due_date: string;
-  is_paid?: boolean;
-  archived?: boolean;
-};
-
-type Expense = {
-  id: string;
-  name: string;
-  amount: number;
-  created_at: string;
-  category?: string;
-  archived?: boolean;
-};
-
-export default function DashboardPage() {
+export default function DashboardOverviewPage() {
   const [budget, setBudget] = useState<Budget | null>(null);
   const [bills, setBills] = useState<Bill[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [recurringBills, setRecurringBills] = useState<RecurringBill[]>([]);
   const [loading, setLoading] = useState(true);
-
-  const [billName, setBillName] = useState("");
-  const [billAmount, setBillAmount] = useState("");
-  const [billDate, setBillDate] = useState("");
-
-  const [expenseName, setExpenseName] = useState("");
-  const [expenseAmount, setExpenseAmount] = useState("");
-  const [expenseCategory, setExpenseCategory] = useState("");
-
-  const [insight, setInsight] = useState("");
+  const [insight, setInsight] = useState("Generating insight...");
 
   useEffect(() => {
-    async function loadDashboard() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+    async function load() {
+      const data = await loadDashboardData();
 
-      if (!user) {
+      if (!data.user) {
         window.location.href = "/login";
         return;
       }
 
-      const { data: budgetData, error: budgetError } = await supabase
-        .from("budgets")
-        .select("balance, paycheck, next_payday")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .single();
-
-      if (budgetError) {
-        console.log("Budget fetch error:", budgetError.message);
-      } else {
-        setBudget(budgetData);
-      }
-
-      const { data: billsData, error: billsError } = await supabase
-        .from("bills")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("archived", false)
-        .order("due_date", { ascending: true });
-
-      if (billsError) {
-        console.log("Bills fetch error:", billsError.message);
-      } else {
-        setBills((billsData || []) as Bill[]);
-      }
-
-      const { data: expensesData, error: expensesError } = await supabase
-        .from("expenses")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("archived", false)
-        .order("created_at", { ascending: false });
-
-      if (expensesError) {
-        console.log("Expenses fetch error:", expensesError.message);
-      } else {
-        setExpenses((expensesData || []) as Expense[]);
-      }
-
+      setBudget(data.budget);
+      setBills(data.bills);
+      setExpenses(data.expenses);
+      setRecurringBills(data.recurringBills);
       setLoading(false);
     }
 
-    loadDashboard();
+    load();
   }, []);
 
   const upcomingBills = useMemo(() => {
@@ -122,18 +65,9 @@ export default function DashboardPage() {
       const due = new Date(bill.due_date);
       due.setHours(0, 0, 0, 0);
 
-      return (
-        !bill.archived &&
-        !bill.is_paid &&
-        due >= today &&
-        due <= payday
-      );
+      return !bill.archived && !bill.is_paid && due >= today && due <= payday;
     });
   }, [bills, budget]);
-
-  const paidBills = useMemo(() => {
-    return bills.filter((bill) => bill.is_paid && !bill.archived);
-  }, [bills]);
 
   const billsTotal = upcomingBills.reduce(
     (sum, bill) => sum + Number(bill.amount),
@@ -145,33 +79,66 @@ export default function DashboardPage() {
     0
   );
 
+const expectedPaycheck = getExpectedPaycheck(budget);
+
   const safeToSpend = budget
-    ? budget.balance - billsTotal - expensesTotal
-    : 0;
-
-  function getDaysUntil(dateString: string) {
-    const today = new Date();
-    const target = new Date(dateString);
-
-    today.setHours(0, 0, 0, 0);
-    target.setHours(0, 0, 0, 0);
-
-    const diffMs = target.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-
-    return diffDays < 0 ? 0 : diffDays;
-  }
+  ? Number(budget.balance) + expectedPaycheck - billsTotal - expensesTotal
+  : 0;
 
   const daysUntilPayday = budget ? getDaysUntil(budget.next_payday) : 0;
 
   const dailySpendingLimit =
     daysUntilPayday > 0 ? safeToSpend / daysUntilPayday : safeToSpend;
 
-  const categoryTotals = expenses.reduce((acc, expense) => {
-    const category = expense.category || "Other";
-    acc[category] = (acc[category] || 0) + Number(expense.amount);
-    return acc;
-  }, {} as Record<string, number>);
+  const categoryTotals = useMemo(() => {
+    return expenses.reduce((acc, expense) => {
+      const category = expense.category || "Other";
+      acc[category] = (acc[category] || 0) + Number(expense.amount);
+      return acc;
+    }, {} as Record<string, number>);
+  }, [expenses]);
+
+  const categoryTotalsKey = useMemo(
+    () => JSON.stringify(categoryTotals),
+    [categoryTotals]
+  );
+
+  useEffect(() => {
+    async function generateInsight() {
+      if (!budget) return;
+
+      try {
+        const response = await fetch("/api/insights", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            balance: budget.balance,
+            safeToSpend,
+            billsTotal,
+            expensesTotal,
+            dailySpendingLimit,
+            nextPayday: budget.next_payday,
+            categories: categoryTotals,
+          }),
+        });
+
+        const data = await response.json();
+        setInsight(data.insight || "Could not generate AI insight right now.");
+      } catch {
+        setInsight("Could not generate AI insight right now.");
+      }
+    }
+
+    generateInsight();
+  }, [
+    budget?.balance,
+    budget?.next_payday,
+    safeToSpend,
+    billsTotal,
+    expensesTotal,
+    dailySpendingLimit,
+    categoryTotalsKey,
+  ]);
 
   const chartData = budget
     ? [
@@ -182,628 +149,275 @@ export default function DashboardPage() {
       ]
     : [];
 
-  useEffect(() => {
-    if (!budget) return;
+  const chartColors: Record<string, string> = {
+    Balance: "#3b82f6",
+    Bills: "#ef4444",
+    Expenses: "#f59e0b",
+    Remaining: "#10b981",
+  };
 
-    const largestCategoryEntry = Object.entries(categoryTotals).sort(
-      (a, b) => Number(b[1]) - Number(a[1])
-    )[0];
-
-    const largestCategory = largestCategoryEntry?.[0];
-    const largestCategoryTotal = largestCategoryEntry?.[1];
-
-    let nextInsight = `You have $${safeToSpend.toFixed(
-      2
-    )} left to safely spend before payday.`;
-
-    if (safeToSpend < 0) {
-      nextInsight =
-        "You are currently over your safe-to-spend amount. Focus on pausing non-essential spending until your next paycheck.";
-    } else if (daysUntilPayday > 0 && dailySpendingLimit < 15) {
-      nextInsight = `Your daily spending limit is only $${dailySpendingLimit.toFixed(
-        2
-      )}. Keep spending tight until payday.`;
-    } else if (billsTotal > budget.balance * 0.5) {
-      nextInsight =
-        "More than half of your current balance is tied up in bills before payday.";
-    } else if (largestCategory && largestCategoryTotal) {
-      nextInsight = `Your biggest expense category right now is ${largestCategory} at $${Number(
-        largestCategoryTotal
-      ).toFixed(2)}.`;
-    }
-
-    setInsight(nextInsight);
-  }, [
-    budget,
-    safeToSpend,
-    dailySpendingLimit,
-    billsTotal,
-    daysUntilPayday,
-    categoryTotals,
-  ]);
-
-  function formatDate(dateString: string) {
-    return new Date(dateString).toLocaleDateString();
-  }
-
-  async function handleLogout() {
-    await supabase.auth.signOut();
-    window.location.href = "/login";
-  }
-
-  async function addBill(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      alert("You must be logged in.");
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("bills")
-      .insert({
-        user_id: user.id,
-        name: billName,
-        amount: Number(billAmount),
-        due_date: billDate,
-        is_paid: false,
-        archived: false,
-      })
-      .select("*")
-      .single();
-
-    if (error) {
-      console.error("Add bill error:", error.message);
-      alert("Could not save bill.");
-      return;
-    }
-
-    if (data) {
-      setBills((prev) =>
-        [...prev, data as Bill].sort((a, b) => a.due_date.localeCompare(b.due_date))
-      );
-    }
-
-    setBillName("");
-    setBillAmount("");
-    setBillDate("");
-  }
-
-  async function deleteBill(id: string) {
-    const { error } = await supabase.from("bills").delete().eq("id", id);
-
-    if (error) {
-      console.error("Delete bill error:", error.message);
-      alert("Could not delete bill.");
-      return;
-    }
-
-    setBills((prev) => prev.filter((bill) => bill.id !== id));
-  }
-
-  async function toggleBillPaid(id: string, currentValue: boolean) {
-    const { error } = await supabase
-      .from("bills")
-      .update({ is_paid: !currentValue })
-      .eq("id", id);
-
-    if (error) {
-      console.error("Toggle bill paid error:", error.message);
-      alert("Could not update bill.");
-      return;
-    }
-
-    setBills((prev) =>
-      prev.map((bill) =>
-        bill.id === id ? { ...bill, is_paid: !currentValue } : bill
-      )
-    );
-  }
-
-  async function addExpense(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      alert("You must be logged in.");
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("expenses")
-      .insert({
-        user_id: user.id,
-        name: expenseName,
-        amount: Number(expenseAmount),
-        category: expenseCategory,
-        archived: false,
-      })
-      .select("*")
-      .single();
-
-    if (error) {
-      console.error("Add expense error:", error.message);
-      alert("Could not save expense.");
-      return;
-    }
-
-    if (data) {
-      setExpenses((prev) => [data as Expense, ...prev]);
-    }
-
-    setExpenseName("");
-    setExpenseAmount("");
-    setExpenseCategory("");
-  }
-
-  async function deleteExpense(id: string) {
-    const { error } = await supabase.from("expenses").delete().eq("id", id);
-
-    if (error) {
-      console.error("Delete expense error:", error.message);
-      alert("Could not delete expense.");
-      return;
-    }
-
-    setExpenses((prev) => prev.filter((expense) => expense.id !== id));
-  }
-
-  async function resetCycle() {
-    const confirmed = window.confirm(
-      "Archive all current expenses and all paid bills?"
-    );
-
-    if (!confirmed) return;
-
-    const { error: expenseError } = await supabase
-      .from("expenses")
-      .update({ archived: true })
-      .eq("archived", false);
-
-    if (expenseError) {
-      console.error("Expense archive error:", expenseError.message);
-      alert("Could not archive expenses.");
-      return;
-    }
-
-    const { error: billError } = await supabase
-      .from("bills")
-      .update({ archived: true })
-      .eq("is_paid", true)
-      .eq("archived", false);
-
-    if (billError) {
-      console.error("Bill archive error:", billError.message);
-      alert("Could not archive paid bills.");
-      return;
-    }
-
-    setExpenses([]);
-    setBills((prev) => prev.filter((bill) => !bill.is_paid));
-    alert("Cycle reset complete.");
-  }
+  const recentCategories = Object.entries(categoryTotals)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, 3);
 
   if (loading) {
     return (
-      <main className="mx-auto max-w-6xl px-6 py-16">
-        <h1 className="text-3xl font-bold">Dashboard</h1>
-        <p className="mt-4 text-gray-600">Loading your budget...</p>
-      </main>
-    );
-  }
-
-  if (!budget) {
-    return (
-      <main className="mx-auto max-w-6xl px-6 py-16">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">Dashboard</h1>
-            <p className="mt-2 text-gray-600">
-              No budget found yet.
-            </p>
-          </div>
-
-          <button
-            onClick={handleLogout}
-            className="rounded-xl border px-4 py-2"
-          >
-            Log Out
-          </button>
+      <DashboardShell title="Overview" subtitle="Loading your dashboard...">
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <p className="text-slate-600">Loading...</p>
         </div>
-
-        <Link
-          href="/onboarding"
-          className="mt-6 inline-block rounded-xl bg-black px-6 py-3 text-white"
-        >
-          Set Up Budget
-        </Link>
-      </main>
+      </DashboardShell>
     );
   }
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-10">
-      <div className="grid gap-8 lg:grid-cols-[220px_1fr]">
-        <aside className="rounded-2xl border p-6">
-          <h2 className="text-xl font-bold">Balnced</h2>
-          <nav className="mt-6 space-y-3 text-sm">
-            <a href="#overview" className="block rounded-lg border px-3 py-2">
-              Overview
-            </a>
-            <a href="#bills" className="block rounded-lg border px-3 py-2">
-              Bills
-            </a>
-            <a href="#expenses" className="block rounded-lg border px-3 py-2">
-              Expenses
-            </a>
-            <a href="#insights" className="block rounded-lg border px-3 py-2">
-              Insights
-            </a>
-          </nav>
+    <DashboardShell
+      title="Overview"
+      subtitle="Your money at a glance, without the clutter."
+    >
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-[28px] bg-gradient-to-br from-emerald-500 to-emerald-600 p-6 text-white shadow-sm">
+          <p className="text-sm text-emerald-50">Safe to Spend</p>
+          <p className="mt-3 text-4xl font-bold tracking-tight">
+            {formatMoney(safeToSpend)}
+          </p>
+          <p className="mt-2 text-sm text-emerald-100">
+            Available before your next payday
+          </p>
+        </div>
 
-          <div className="mt-8 space-y-3">
-            <Link
-              href="/onboarding"
-              className="block rounded-xl border px-4 py-2 text-center"
-            >
-              Edit Budget
-            </Link>
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <p className="text-sm text-slate-500">Current Balance</p>
+          <p className="mt-3 text-4xl font-bold tracking-tight text-slate-900">
+            {formatMoney(Number(budget?.balance || 0))}
+          </p>
+          <p className="mt-2 text-sm text-slate-400">
+            Your latest recorded balance
+          </p>
+        </div>
 
-            <button
-              onClick={resetCycle}
-              className="w-full rounded-xl border px-4 py-2"
-            >
-              Reset Cycle
-            </button>
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <p className="text-sm text-slate-500">Next Payday</p>
+          <p className="mt-3 text-4xl font-bold tracking-tight text-slate-900">
+            {budget ? formatDate(budget.next_payday) : "--"}
+          </p>
+          <p className="mt-2 text-sm text-slate-400">
+            {daysUntilPayday} day{daysUntilPayday === 1 ? "" : "s"} away
+          </p>
+        </div>
 
-            <button
-              onClick={handleLogout}
-              className="w-full rounded-xl border px-4 py-2"
-            >
-              Log Out
-            </button>
-          </div>
-        </aside>
-
-        <section>
-          <div className="flex items-center justify-between" id="overview">
-            <div>
-              <h1 className="text-3xl font-bold">Dashboard</h1>
-              <p className="mt-2 text-gray-600">
-                Welcome to Balnced. This is your money overview.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-8 grid gap-4 md:grid-cols-3">
-            <div className="rounded-2xl border p-6">
-              <h2 className="text-sm text-gray-500">Safe to Spend</h2>
-              <p className="mt-2 text-3xl font-bold">
-                ${safeToSpend.toFixed(2)}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border p-6">
-              <h2 className="text-sm text-gray-500">Current Balance</h2>
-              <p className="mt-2 text-3xl font-bold">
-                ${Number(budget.balance).toFixed(2)}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border p-6">
-              <h2 className="text-sm text-gray-500">Paycheck Amount</h2>
-              <p className="mt-2 text-3xl font-bold">
-                ${Number(budget.paycheck).toFixed(2)}
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 grid gap-4 md:grid-cols-3">
-            <div className="rounded-2xl border p-6">
-              <h2 className="text-sm text-gray-500">Bills Before Payday</h2>
-              <p className="mt-2 text-2xl font-bold">
-                ${billsTotal.toFixed(2)}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border p-6">
-              <h2 className="text-sm text-gray-500">Total Expenses</h2>
-              <p className="mt-2 text-2xl font-bold">
-                ${expensesTotal.toFixed(2)}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border p-6">
-              <h2 className="text-sm text-gray-500">Next Payday</h2>
-              <p className="mt-2 text-2xl font-bold">
-                {formatDate(budget.next_payday)}
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-2xl border p-6">
-            <h2 className="text-sm text-gray-500">Daily Spending Limit</h2>
-            <p className="mt-2 text-3xl font-bold">
-              ${dailySpendingLimit.toFixed(2)}
-            </p>
-            <p className="mt-2 text-sm text-gray-600">
-              Based on {daysUntilPayday} day(s) until payday.
-            </p>
-          </div>
-
-          <div className="mt-8 rounded-2xl border p-6">
-            <h2 className="text-xl font-semibold">Budget Overview</h2>
-            <p className="mt-2 text-gray-600">
-              See how your money is split right now.
-            </p>
-
-            <div className="mt-6 h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData}>
-                  <XAxis dataKey="name" />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="value" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          <div className="mt-8 rounded-2xl border p-6" id="insights">
-            <h2 className="text-xl font-semibold">AI Insight</h2>
-            <p className="mt-2 text-gray-600">{insight}</p>
-          </div>
-
-          <div className="mt-8 grid gap-8 md:grid-cols-2">
-            <div className="rounded-2xl border p-6" id="bills">
-              <h2 className="text-xl font-semibold">Add a Bill</h2>
-              <p className="mt-2 text-gray-600">
-                Add bills due before your next payday.
-              </p>
-
-              <form onSubmit={addBill} className="mt-4 space-y-3">
-                <input
-                  type="text"
-                  placeholder="Bill name"
-                  value={billName}
-                  onChange={(e) => setBillName(e.target.value)}
-                  className="w-full rounded-xl border p-3"
-                  required
-                />
-
-                <input
-                  type="number"
-                  placeholder="Amount"
-                  value={billAmount}
-                  onChange={(e) => setBillAmount(e.target.value)}
-                  className="w-full rounded-xl border p-3"
-                  required
-                />
-
-                <input
-                  type="date"
-                  value={billDate}
-                  onChange={(e) => setBillDate(e.target.value)}
-                  className="w-full rounded-xl border p-3"
-                  required
-                />
-
-                <button
-                  type="submit"
-                  className="rounded-xl bg-black px-6 py-3 text-white"
-                >
-                  Add Bill
-                </button>
-              </form>
-            </div>
-
-            <div className="rounded-2xl border p-6" id="expenses">
-              <h2 className="text-xl font-semibold">Add an Expense</h2>
-              <p className="mt-2 text-gray-600">
-                Track spending as it happens.
-              </p>
-
-              <form onSubmit={addExpense} className="mt-4 space-y-3">
-                <input
-                  type="text"
-                  placeholder="Expense name"
-                  value={expenseName}
-                  onChange={(e) => setExpenseName(e.target.value)}
-                  className="w-full rounded-xl border p-3"
-                  required
-                />
-
-                <input
-                  type="number"
-                  placeholder="Amount"
-                  value={expenseAmount}
-                  onChange={(e) => setExpenseAmount(e.target.value)}
-                  className="w-full rounded-xl border p-3"
-                  required
-                />
-
-                <select
-                  value={expenseCategory}
-                  onChange={(e) => setExpenseCategory(e.target.value)}
-                  className="w-full rounded-xl border p-3"
-                  required
-                >
-                  <option value="">Select category</option>
-                  <option value="Groceries">Groceries</option>
-                  <option value="Gas">Gas</option>
-                  <option value="Restaurants">Restaurants</option>
-                  <option value="Shopping">Shopping</option>
-                  <option value="Subscriptions">Subscriptions</option>
-                  <option value="Entertainment">Entertainment</option>
-                  <option value="Other">Other</option>
-                </select>
-
-                <button
-                  type="submit"
-                  className="rounded-xl bg-black px-6 py-3 text-white"
-                >
-                  Add Expense
-                </button>
-              </form>
-            </div>
-          </div>
-
-          <div className="mt-8 rounded-2xl border p-6">
-            <h2 className="text-xl font-semibold">Expense Categories</h2>
-
-            {Object.keys(categoryTotals).length === 0 ? (
-              <p className="mt-2 text-gray-600">No expense categories yet.</p>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {Object.entries(categoryTotals).map(([category, total]) => (
-                  <div
-                    key={category}
-                    className="flex items-center justify-between rounded-xl border p-4"
-                  >
-                    <p>{category}</p>
-                    <p className="font-semibold">
-                      ${Number(total).toFixed(2)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-8 rounded-2xl border p-6">
-            <h2 className="text-xl font-semibold">Upcoming Bills</h2>
-
-            {upcomingBills.length === 0 ? (
-              <p className="mt-2 text-gray-600">No bills due before payday.</p>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {upcomingBills.map((bill) => (
-                  <div
-                    key={bill.id}
-                    className="flex items-center justify-between rounded-xl border p-4"
-                  >
-                    <div>
-                      <p className="font-medium">{bill.name}</p>
-                      <p className="text-sm text-gray-600">
-                        Due {formatDate(bill.due_date)}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <p className="font-semibold">
-                        ${Number(bill.amount).toFixed(2)}
-                      </p>
-
-                      <button
-                        onClick={() => toggleBillPaid(bill.id, !!bill.is_paid)}
-                        className="rounded-lg border px-3 py-1 text-sm"
-                      >
-                        Mark Paid
-                      </button>
-
-                      <button
-                        onClick={() => deleteBill(bill.id)}
-                        className="rounded-lg border px-3 py-1 text-sm"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-8 rounded-2xl border p-6">
-            <h2 className="text-xl font-semibold">Paid Bills</h2>
-
-            {paidBills.length === 0 ? (
-              <p className="mt-2 text-gray-600">No paid bills yet.</p>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {paidBills.map((bill) => (
-                  <div
-                    key={bill.id}
-                    className="flex items-center justify-between rounded-xl border p-4"
-                  >
-                    <div>
-                      <p className="font-medium">{bill.name}</p>
-                      <p className="text-sm text-gray-600">
-                        Due {formatDate(bill.due_date)}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <p className="font-semibold">
-                        ${Number(bill.amount).toFixed(2)}
-                      </p>
-
-                      <button
-                        onClick={() => toggleBillPaid(bill.id, !!bill.is_paid)}
-                        className="rounded-lg border px-3 py-1 text-sm"
-                      >
-                        Unmark
-                      </button>
-
-                      <button
-                        onClick={() => deleteBill(bill.id)}
-                        className="rounded-lg border px-3 py-1 text-sm"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-8 rounded-2xl border p-6">
-            <h2 className="text-xl font-semibold">Recent Expenses</h2>
-
-            {expenses.length === 0 ? (
-              <p className="mt-2 text-gray-600">No expenses recorded yet.</p>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {expenses.map((expense) => (
-                  <div
-                    key={expense.id}
-                    className="flex items-center justify-between rounded-xl border p-4"
-                  >
-                    <div>
-                      <p className="font-medium">{expense.name}</p>
-                      <p className="text-sm text-gray-600">
-                        {expense.category ? `${expense.category} • ` : ""}
-                        Added {formatDate(expense.created_at)}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <p className="font-semibold">
-                        ${Number(expense.amount).toFixed(2)}
-                      </p>
-
-                      <button
-                        onClick={() => deleteExpense(expense.id)}
-                        className="rounded-lg border px-3 py-1 text-sm"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </section>
+        <div className="rounded-[28px] bg-gradient-to-br from-blue-600 to-indigo-600 p-6 text-white shadow-sm">
+          <p className="text-sm text-blue-100">Daily Limit</p>
+          <p className="mt-3 text-4xl font-bold tracking-tight">
+            {formatMoney(dailySpendingLimit)}
+          </p>
+          <p className="mt-2 text-sm text-blue-100">
+            Based on days left until payday
+          </p>
+        </div>
       </div>
-    </main>
+
+      <div className="grid gap-6 2xl:grid-cols-[1.35fr_0.95fr]">
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-900">
+                Cash Flow Snapshot
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                A quick view of where your money stands right now.
+              </p>
+            </div>
+
+            <Link
+              href="/dashboard/projection"
+              className="inline-flex rounded-2xl bg-slate-100 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-200"
+            >
+              View Projection
+            </Link>
+          </div>
+
+          <div className="mt-6 h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData} barCategoryGap={30}>
+                <CartesianGrid
+                  vertical={false}
+                  strokeDasharray="3 3"
+                  stroke="#e2e8f0"
+                />
+                <XAxis
+                  dataKey="name"
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: "#64748b", fontSize: 13 }}
+                />
+                <YAxis
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: "#64748b", fontSize: 13 }}
+                />
+                <Tooltip
+                  cursor={{ fill: "rgba(148,163,184,0.08)" }}
+                  formatter={(value: number) => formatMoney(Number(value))}
+                  contentStyle={{
+                    borderRadius: "12px",
+                    border: "1px solid #e2e8f0",
+                    backgroundColor: "#ffffff",
+                  }}
+                />
+                <Bar dataKey="value" radius={[14, 14, 0, 0]}>
+                  {chartData.map((entry, index) => (
+                    <Cell
+                      key={`cell-${index}`}
+                      fill={chartColors[entry.name] || "#64748b"}
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-900">
+                AI Insight
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Personalized guidance based on your current numbers.
+              </p>
+            </div>
+
+            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Live
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl bg-slate-50 p-5">
+            <p className="leading-8 text-slate-700">{insight}</p>
+          </div>
+
+          <Link
+            href="/dashboard/insights"
+            className="mt-6 inline-flex rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Open Insights
+          </Link>
+        </div>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-900">
+                Upcoming Bills
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Bills due before your next payday.
+              </p>
+            </div>
+
+            <Link
+              href="/dashboard/bills"
+              className="text-sm font-semibold text-emerald-600 hover:text-emerald-700"
+            >
+              Manage
+            </Link>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {upcomingBills.slice(0, 4).map((bill) => (
+              <div
+                key={bill.id}
+                className="flex flex-col gap-3 rounded-2xl bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div>
+                  <p className="font-medium text-slate-900">{bill.name}</p>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Due {formatDate(bill.due_date)}
+                  </p>
+                </div>
+
+                <div className="inline-flex w-fit rounded-full bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 ring-1 ring-slate-200">
+                  {formatMoney(Number(bill.amount))}
+                </div>
+              </div>
+            ))}
+
+            {upcomingBills.length === 0 && (
+              <div className="rounded-2xl bg-slate-50 p-5 text-slate-500">
+                No bills due before payday.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-900">
+                Quick Stats
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                A simple summary of your current cycle.
+              </p>
+            </div>
+
+            <Link
+              href="/dashboard/expenses"
+              className="text-sm font-semibold text-emerald-600 hover:text-emerald-700"
+            >
+              View Expenses
+            </Link>
+          </div>
+
+          <div className="mt-5 grid gap-3">
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-sm text-slate-500">Bills Before Payday</p>
+              <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
+                {formatMoney(billsTotal)}
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-sm text-slate-500">Total Expenses</p>
+              <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
+                {formatMoney(expensesTotal)}
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-sm text-slate-500">Recurring Bills</p>
+              <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
+                {recurringBills.length}
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <p className="text-sm text-slate-500">Top Spending Categories</p>
+
+              {recentCategories.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {recentCategories.map(([category, total]) => (
+                    <div
+                      key={category}
+                      className="rounded-full bg-white px-3 py-1.5 text-sm font-medium text-slate-700 ring-1 ring-slate-200"
+                    >
+                      {category}: {formatMoney(Number(total))}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-slate-400">
+                  No spending categories yet.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </DashboardShell>
   );
 }
