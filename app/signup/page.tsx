@@ -13,7 +13,7 @@ export default function SignupPage() {
     setMessage("Creating account...");
 
     try {
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
       });
@@ -23,7 +23,12 @@ export default function SignupPage() {
         return;
       }
 
-      setMessage("Account created. Check your email to confirm your signup.");
+      if (data.session) {
+        window.location.href = "/onboarding";
+        return;
+      }
+
+      setMessage("Account created. Check your email to confirm, then log in to finish setup.");
     } catch (err) {
       console.error("Signup error:", err);
       setMessage(

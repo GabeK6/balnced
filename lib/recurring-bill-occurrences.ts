@@ -20,6 +20,68 @@ export function normalizeBillDueDate(due: string | null | undefined): string {
   return "";
 }
 
+/**
+ * True when a ledger `due_date` (date, timestamp, or ISO string) is the same **local calendar day**
+ * as `wantYmd` (YYYY-MM-DD). Avoids false mismatches between UI occurrence dates and DB timestamps.
+ */
+export function billDueOnCalendarDay(
+  billDueDate: string | null | undefined,
+  wantYmd: string
+): boolean {
+  if (billDueDate == null || billDueDate === "" || !wantYmd) return false;
+  const want = parseDateOnlyLocal(normalizeBillDueDate(wantYmd));
+  if (!want) return false;
+
+  const s = String(billDueDate).trim();
+  const head = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (head) {
+    const bill = parseDateOnlyLocal(head[1]);
+    if (bill && bill.getTime() === want.getTime()) return true;
+  }
+
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return (
+      parsed.getFullYear() === want.getFullYear() &&
+      parsed.getMonth() === want.getMonth() &&
+      parsed.getDate() === want.getDate()
+    );
+  }
+  return false;
+}
+
+/**
+ * IDs from Supabase may differ by UUID case or hyphenation vs `::text` in SQL.
+ */
+export function recurringBillIdsMatch(
+  a: string | null | undefined,
+  b: string | null | undefined
+): boolean {
+  const norm = (x: string) => x.trim().toLowerCase().replace(/-/g, "");
+  const x = norm(String(a ?? ""));
+  const y = norm(String(b ?? ""));
+  return x.length > 0 && x === y;
+}
+
+/**
+ * Aligns with RPC `left(b.due_date::text, 10) = want` plus calendar-day checks.
+ */
+export function ledgerDueMatchesOccurrence(
+  billDueDate: string | null | undefined,
+  wantYmd: string
+): boolean {
+  const w = normalizeBillDueDate(wantYmd);
+  if (!w) return false;
+  if (billDueOnCalendarDay(billDueDate, w)) return true;
+  if (normalizeBillDueDate(billDueDate) === w) return true;
+  const raw = String(billDueDate ?? "").trim();
+  if (raw.length >= 10) {
+    const head = raw.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(head) && head === w) return true;
+  }
+  return false;
+}
+
 export type EnrichedOccurrence = {
   recurringBill: RecurringBill;
   dueDate: string;
@@ -172,8 +234,8 @@ function findBillsForOccurrence(
   const want = normalizeBillDueDate(dueDate);
   return bills.filter(
     (b) =>
-      String(b.recurring_bill_id ?? "") === String(recurringBillId ?? "") &&
-      normalizeBillDueDate(b.due_date) === want &&
+      recurringBillIdsMatch(b.recurring_bill_id, recurringBillId) &&
+      ledgerDueMatchesOccurrence(b.due_date, want) &&
       !b.archived
   );
 }
@@ -416,8 +478,11 @@ export type DashboardUpcomingBillLine = {
   due_date: string;
 };
 
-/** How far back we scan for unpaid obligations (overdue) in cash-flow / dashboard math. */
-export const BILL_OBLIGATION_LOOKBACK_DAYS = 1095;
+/**
+ * How far back we scan for unpaid obligations (overdue) in cash-flow / dashboard math.
+ * Keep this bounded — multi-year lookbacks treated years of virtual + ledger lines as “overdue”.
+ */
+export const BILL_OBLIGATION_LOOKBACK_DAYS = 120;
 
 /**
  * Unpaid bills with due date in [rangeStart, rangeEnd] (inclusive), local calendar days.
@@ -440,7 +505,9 @@ export function getDashboardBillsInClosedRange(
   const reStr = toDateOnlyStr(re);
 
   const recurringKeyCovered = new Set<string>();
-  const result: DashboardUpcomingBillLine[] = [];
+  /** Internal: track template id so we keep one obligation line per recurring stream. */
+  type LineWithRec = DashboardUpcomingBillLine & { _recurringId: string | null };
+  const result: LineWithRec[] = [];
 
   for (const b of bills) {
     if (b.archived) continue;
@@ -455,11 +522,16 @@ export function getDashboardBillsInClosedRange(
     if (b.archived || billIsPaid(b)) continue;
     const nd = normalizeBillDueDate(b.due_date);
     if (!nd || nd < rsStr || nd > reStr) continue;
+    const recId =
+      b.recurring_bill_id != null && String(b.recurring_bill_id).length > 0
+        ? String(b.recurring_bill_id)
+        : null;
     result.push({
       id: String(b.id),
       name: b.name,
       amount: Number(b.amount),
       due_date: nd,
+      _recurringId: recId,
     });
   }
 
@@ -474,11 +546,25 @@ export function getDashboardBillsInClosedRange(
         name: tmpl.name,
         amount: Number(tmpl.amount),
         due_date: dueStr,
+        _recurringId: String(tmpl.id),
       });
     }
   }
 
-  return result.sort((a, b) => a.due_date.localeCompare(b.due_date));
+  const oneTime = result.filter((l) => l._recurringId == null);
+  const earliestByRecurring = new Map<string, LineWithRec>();
+  for (const l of result) {
+    if (l._recurringId == null) continue;
+    const prev = earliestByRecurring.get(l._recurringId);
+    if (!prev || l.due_date < prev.due_date) {
+      earliestByRecurring.set(l._recurringId, l);
+    }
+  }
+
+  const merged = [...oneTime, ...earliestByRecurring.values()].sort((a, b) =>
+    a.due_date.localeCompare(b.due_date)
+  );
+  return merged.map(({ _recurringId: _r, ...line }) => line);
 }
 
 /**

@@ -416,8 +416,12 @@ export async function generateRecurringBills(
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const ninetyDaysOut = addDays(today, 90);
-  /** Past anchors (e.g. “monthly on the 1st” before today) must get real `bills` rows; otherwise Overdue stays “Planned” and paid toggles have nothing to update. */
-  const lookback = addDays(today, -400);
+  /**
+   * Only materialize ledger rows from the start of the previous calendar month forward.
+   * A multi-year lookback created huge historical runs (weekly/monthly) and inflated Projection/“overdue”.
+   */
+  const lookback = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  lookback.setHours(0, 0, 0, 0);
 
   const { data: existingBillsData, error: existingBillsError } = await supabase
     .from("bills")

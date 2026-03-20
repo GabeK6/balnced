@@ -66,6 +66,13 @@ function DashboardOverviewContent() {
       return;
     }
 
+    const payday = data.budget?.next_payday;
+    const hasPayday = payday != null && String(payday).trim() !== "";
+    if (!data.budget || !hasPayday) {
+      window.location.href = "/onboarding";
+      return;
+    }
+
     setUserId(data.user.id);
     setBudget(data.budget);
     setBills(data.bills);

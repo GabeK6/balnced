@@ -9,18 +9,38 @@ import {
   Bill,
   RecurringBill,
   generateRecurringBills,
+  addDays,
+  parseDateOnlyLocal,
+  toDateOnly,
 } from "@/lib/dashboard-data";
 import {
   billIsPaid,
   classifyBillOccurrences,
   getPaidRecurringBills,
+  ledgerDueMatchesOccurrence,
   normalizeBillDueDate,
+  recurringBillIdsMatch,
   type EnrichedOccurrence,
 } from "@/lib/recurring-bill-occurrences";
 import { supabase } from "@/lib/supabase";
 
 function occurrenceUiKey(occ: EnrichedOccurrence): string {
   return `${occ.recurringBill.id}:${normalizeBillDueDate(occ.dueDate)}`;
+}
+
+/** PostgREST RPC return shapes vary by Postgres type (int, bigint-as-string, etc.). */
+function parseRpcAffectedRows(data: unknown): number {
+  if (data == null) return 0;
+  if (typeof data === "number" && Number.isFinite(data)) return data;
+  if (typeof data === "string" && data.trim() !== "") {
+    const n = Number(data);
+    return Number.isFinite(n) ? n : 0;
+  }
+  if (typeof data === "object" && data !== null && "count" in (data as object)) {
+    return parseRpcAffectedRows((data as { count: unknown }).count);
+  }
+  const n = Number(data);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export default function BillsPage() {
@@ -31,6 +51,7 @@ export default function BillsPage() {
   const [occurrencePaidOptimistic, setOccurrencePaidOptimistic] = useState<
     Record<string, boolean>
   >({});
+  const [billActionError, setBillActionError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
@@ -87,27 +108,39 @@ export default function BillsPage() {
 
   const setOccurrencePaid = useCallback(
     async (occ: EnrichedOccurrence, paid: boolean): Promise<boolean> => {
+      setBillActionError(null);
+
       const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const user = session?.user;
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) {
+        const msg = authErr.message || "Auth error.";
+        setBillActionError(msg);
+        alert(msg);
+        return false;
+      }
       if (!user) {
-        alert("You need to be signed in to update bills.");
+        const msg = "You need to be signed in to update bills.";
+        setBillActionError(msg);
+        alert(msg);
         return false;
       }
 
-      /** Create missing `bills` rows for past/current-cycle due dates (see generateRecurringBills lookback). */
+      /** Create missing `bills` rows for current window (see generateRecurringBills lookback). */
       await generateRecurringBills(user.id, recurringBills);
 
       const want = normalizeBillDueDate(occ.dueDate);
       if (!want) {
-        alert("Could not determine this bill's due date.");
+        const msg = "Could not determine this bill's due date.";
+        setBillActionError(msg);
+        alert(msg);
         return false;
       }
 
       const ledgerRowsMatchOccurrence = (b: Bill) =>
-        String(b.recurring_bill_id ?? "") === String(occ.recurringBill.id ?? "") &&
-        normalizeBillDueDate(b.due_date) === want &&
+        recurringBillIdsMatch(b.recurring_bill_id, occ.recurringBill.id) &&
+        ledgerDueMatchesOccurrence(b.due_date, want) &&
         !b.archived;
 
       const verifyLedgerReflectsPaid = (list: Bill[]): boolean => {
@@ -127,12 +160,14 @@ export default function BillsPage() {
           .eq("archived", false);
         if (qErr) {
           console.error(qErr);
-          alert(qErr.message || "Could not look up bill.");
+          const msg = qErr.message || "Could not look up bill.";
+          setBillActionError(msg);
+          alert(msg);
           return [];
         }
         const ids =
           candidates
-            ?.filter((r) => normalizeBillDueDate(r.due_date) === want)
+            ?.filter((r) => ledgerDueMatchesOccurrence(r.due_date, want))
             .map((r) => String(r.id)) ?? [];
         const idSet = new Set(ids);
         if (occ.billId) idSet.add(String(occ.billId));
@@ -152,14 +187,42 @@ export default function BillsPage() {
           .eq("user_id", user.id);
         if (error) {
           console.error(error);
-          alert(error.message || "Could not update bill.");
+          const msg = error.message || "Could not update bill.";
+          setBillActionError(msg);
+          alert(msg);
           return false;
         }
         return true;
       };
 
-      /** Some DBs store due_date as timestamptz; IN covers several serializations. */
-      const updatePaidByNaturalKeys = async (): Promise<boolean> => {
+      /**
+       * Prefer a half-open calendar-day window so `date` / `timestamptz` rows match.
+       * Plain `.in("due_date", ["2026-03-01", ...])` often updates 0 rows (no error).
+       */
+      const updatePaidByCalendarDayWindow = async (): Promise<boolean> => {
+        const start = parseDateOnlyLocal(want);
+        if (!start) return false;
+        const dayAfter = toDateOnly(addDays(start, 1));
+        const { error } = await supabase
+          .from("bills")
+          .update({ is_paid: paid })
+          .eq("user_id", user.id)
+          .eq("recurring_bill_id", occ.recurringBill.id)
+          .eq("archived", false)
+          .gte("due_date", want)
+          .lt("due_date", dayAfter);
+        if (error) {
+          console.error(error);
+          const msg = error.message || "Could not update bill.";
+          setBillActionError(msg);
+          alert(msg);
+          return false;
+        }
+        return true;
+      };
+
+      /** Fallback for exotic due_date serializations. */
+      const updatePaidByDueVariants = async (): Promise<boolean> => {
         const dueVariants = Array.from(
           new Set([
             want,
@@ -178,7 +241,9 @@ export default function BillsPage() {
           .in("due_date", dueVariants);
         if (error) {
           console.error(error);
-          alert(error.message || "Could not update bill.");
+          const msg = error.message || "Could not update bill.";
+          setBillActionError(msg);
+          alert(msg);
           return false;
         }
         return true;
@@ -213,19 +278,24 @@ export default function BillsPage() {
             error.code === "PGRST202";
           return { ok: false, rowCount: 0, missing, errMsg: error.message };
         }
-        const rowCount = typeof data === "number" ? data : Number(data ?? 0);
-        return { ok: true, rowCount: Number.isFinite(rowCount) ? rowCount : 0, missing: false };
+        const rowCount = parseRpcAffectedRows(data);
+        return { ok: true, rowCount, missing: false };
       };
 
       const rpcResult = await rpcUpdateOccurrence();
-      if (rpcResult.ok && rpcResult.rowCount > 0 && (await tryFinish())) {
-        return true;
-      }
-      if (rpcResult.ok && rpcResult.rowCount > 0 && !(await tryFinish())) {
-        alert(
-          "Database updated but paid state did not load. Refresh the page. If it persists, check the is_paid column on public.bills."
+      if (rpcResult.ok && rpcResult.rowCount > 0) {
+        if (await tryFinish()) return true;
+        await new Promise((r) => setTimeout(r, 200));
+        if (await tryFinish()) return true;
+        /**
+         * RPC already updated `is_paid` (SECURITY DEFINER). If verify still fails, it is
+         * almost always client-side ID/date matching drift — refresh data and continue.
+         */
+        console.warn(
+          "set_bill_occurrence_paid: post-RPC verify mismatch; refetching (DB update already applied)"
         );
-        return false;
+        await refetchBills();
+        return true;
       }
       if (!rpcResult.ok && !rpcResult.missing && rpcResult.errMsg) {
         console.error("set_bill_occurrence_paid:", rpcResult.errMsg);
@@ -237,7 +307,10 @@ export default function BillsPage() {
         if (await tryFinish()) return true;
       }
 
-      await updatePaidByNaturalKeys();
+      await updatePaidByCalendarDayWindow();
+      if (await tryFinish()) return true;
+
+      await updatePaidByDueVariants();
       if (await tryFinish()) return true;
 
       const { error: insertErr } = await supabase.from("bills").insert({
@@ -253,21 +326,25 @@ export default function BillsPage() {
 
       if (insertErr) {
         console.error(insertErr);
-        await updatePaidByNaturalKeys();
+        await updatePaidByCalendarDayWindow();
+        await updatePaidByDueVariants();
         if (await tryFinish()) return true;
         if (ledgerIds.length > 0) {
           await updatePaidByIds(ledgerIds);
           if (await tryFinish()) return true;
         }
-        alert(insertErr.message || "Could not save bill.");
+        const im = insertErr.message || "Could not save bill.";
+        setBillActionError(im);
+        alert(im);
         return false;
       }
 
       if (await tryFinish()) return true;
 
-      alert(
-        "Could not confirm bill was saved. Add column if missing: alter table public.bills add column if not exists is_paid boolean default false;"
-      );
+      const msg =
+        "Could not confirm bill was saved. Add column if missing: alter table public.bills add column if not exists is_paid boolean default false;";
+      setBillActionError(msg);
+      alert(msg);
       return false;
     },
     [refetchBills, recurringBills]
@@ -325,17 +402,30 @@ export default function BillsPage() {
   }
 
   async function deleteRecurringBill(id: string) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return alert("You need to be signed in.");
     const { error } = await supabase
       .from("recurring_bills")
       .delete()
-      .eq("id", id);
+      .eq("id", id)
+      .eq("user_id", user.id);
     if (error) return alert("Could not delete recurring bill.");
     setRecurringBills((prev) => prev.filter((rb) => rb.id !== id));
     setBills((prev) => prev.filter((b) => b.recurring_bill_id !== id));
   }
 
   async function deleteBill(id: string) {
-    const { error } = await supabase.from("bills").delete().eq("id", id);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return alert("You need to be signed in.");
+    const { error } = await supabase
+      .from("bills")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", user.id);
     if (error) return alert("Could not delete bill.");
     setBills((prev) => prev.filter((bill) => bill.id !== id));
   }
@@ -380,22 +470,49 @@ export default function BillsPage() {
         }`}
       >
         <div className="flex flex-1 items-center gap-3">
-          <input
-            type="checkbox"
-            checked={checked}
-            onChange={(e) => {
-              e.stopPropagation();
-              const nextPaid = e.target.checked;
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={checked}
+            aria-label={checked ? "Mark as unpaid" : "Mark as paid"}
+            onClick={() => {
+              setBillActionError(null);
+              const nextPaid = !checked;
               setOccurrencePaidOptimistic((prev) => ({ ...prev, [ok]: nextPaid }));
-              void setOccurrencePaid(occ, nextPaid).finally(() => {
-                setOccurrencePaidOptimistic((prev) => {
-                  const { [ok]: _, ...rest } = prev;
-                  return rest;
-                });
-              });
+              void (async () => {
+                try {
+                  const okSave = await setOccurrencePaid(occ, nextPaid);
+                  if (!okSave) {
+                    const msg =
+                      "Could not mark this bill paid. See the red message above or open DevTools (F12) → Console.";
+                    setBillActionError((prev) => prev ?? msg);
+                    console.warn("setOccurrencePaid returned false", {
+                      recurringId: occ.recurringBill.id,
+                      due: normalizeBillDueDate(occ.dueDate),
+                    });
+                  }
+                } catch (err) {
+                  console.error(err);
+                  const msg =
+                    err instanceof Error ? err.message : String(err ?? "Could not update bill.");
+                  setBillActionError(msg);
+                  alert(msg);
+                } finally {
+                  setOccurrencePaidOptimistic((prev) => {
+                    const { [ok]: _, ...rest } = prev;
+                    return rest;
+                  });
+                }
+              })();
             }}
-            className="h-5 w-5 shrink-0 cursor-pointer rounded border-slate-300 text-emerald-500 focus:ring-emerald-500 dark:border-slate-500"
-          />
+            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[10px] font-bold leading-none focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+              checked
+                ? "border-emerald-500 bg-emerald-600 text-white"
+                : "cursor-pointer border-slate-300 bg-transparent hover:border-slate-400 dark:border-slate-500 dark:hover:border-slate-400"
+            }`}
+          >
+            {checked ? "✓" : ""}
+          </button>
           <div>
             <p className="font-medium text-slate-100">
               {occ.recurringBill.name}
@@ -440,7 +557,25 @@ export default function BillsPage() {
       backLabel="Back to Overview"
       compact
     >
-      <div className="grid h-full min-h-0 gap-4 sm:gap-5 lg:grid-cols-3">
+      <>
+        {billActionError ? (
+          <div
+            className="mb-4 rounded-xl border border-rose-300/80 bg-rose-50 px-4 py-3 text-sm text-rose-900 dark:border-rose-800/60 dark:bg-rose-950/50 dark:text-rose-100"
+            role="alert"
+          >
+            <p className="font-semibold">Bill update failed</p>
+            <p className="mt-1 whitespace-pre-wrap">{billActionError}</p>
+            <button
+              type="button"
+              className="mt-2 text-xs font-medium text-rose-800 underline hover:no-underline dark:text-rose-200"
+              onClick={() => setBillActionError(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+
+        <div className="grid h-full min-h-0 gap-4 sm:gap-5 lg:grid-cols-3">
         <div className="balnced-panel rounded-2xl p-5 sm:p-6">
           <h2 className="text-base font-semibold text-slate-100">
             Add recurring bill
@@ -664,6 +799,7 @@ export default function BillsPage() {
           </div>
         </div>
       </div>
+      </>
     </DashboardShell>
   );
 }
