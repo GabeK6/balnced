@@ -1,0 +1,45 @@
+---
+alwaysApply: true
+---
+You are working on Balnced, a Next.js budgeting app.
+
+Core goal:
+Help users understand how much money they can safely spend between paychecks.
+
+Key concepts:
+- current balance
+- expected paycheck
+- upcoming bills
+- expenses
+- safe to spend
+- daily spending limit
+
+Tech stack:
+- Next.js App Router
+- Supabase database
+- Recharts charts
+- OpenAI insights
+- Vercel deployment
+
+Rules for modifying code:
+
+1. Make the smallest safe change possible.
+2. Never refactor unrelated code.
+3. Preserve existing functionality unless explicitly asked.
+4. Before editing code, identify the exact files that must change.
+5. Reuse existing logic instead of creating duplicate systems.
+6. Follow the existing UI styling patterns.
+
+For payday features:
+Extend the existing paycheck logic instead of replacing it.
+
+Never modify:
+- authentication
+- deployment configuration
+- environment variables
+- billing systems
+
+Always explain:
+- which files changed
+- why the change was needed
+- how to test it

@@ -1,73 +1,151 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState, useCallback } from "react";
 import Link from "next/link";
+import { motion, useReducedMotion } from "framer-motion";
+import { useSearchParams } from "next/navigation";
 import DashboardShell from "@/components/dashboard/shell";
 import {
   loadDashboardData,
+  loadUserGoals,
+  getSavingsGoalTimelines,
   formatDate,
   formatMoney,
+  formatDateMonthYear,
   getDaysUntil,
   getExpectedPaycheck,
+  getMonthlyPay,
+  getNextPayday,
+  getAnnualPay,
   Budget,
   Bill,
   Expense,
   RecurringBill,
 } from "@/lib/dashboard-data";
+import { getSafeToSpendStatus } from "@/lib/financial-status";
+import { runProjection, type RetirementProfile } from "@/lib/retirement-projection";
+import { legacyToAccounts } from "@/lib/retirement-accounts";
+import { supabase } from "@/lib/supabase";
+import { getDashboardBillsBeforePayday } from "@/lib/recurring-bill-occurrences";
 import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  Cell,
-} from "recharts";
+  OverviewGlassStat,
+  OverviewRetirementHero,
+  OverviewSafeToSpendHero,
+  OverviewWhatToDoNext,
+  getInsightAccent,
+} from "@/components/dashboard/overview-premium";
+import { MotionLink } from "@/components/motion/motion-link";
+import { EASE_OUT, fadeUpItem, staggerContainer } from "@/components/motion/overview-variants";
 
-export default function DashboardOverviewPage() {
+const panelClassName =
+  "rounded-3xl border border-white/[0.07] bg-slate-950/40 p-5 shadow-[0_8px_32px_-16px_rgba(0,0,0,0.55)] sm:p-6 md:p-7";
+
+function DashboardOverviewContent() {
+  const reduce = useReducedMotion();
+  const searchParams = useSearchParams();
+  const [userId, setUserId] = useState<string | null>(null);
   const [budget, setBudget] = useState<Budget | null>(null);
   const [bills, setBills] = useState<Bill[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [recurringBills, setRecurringBills] = useState<RecurringBill[]>([]);
   const [loading, setLoading] = useState(true);
-  const [insight, setInsight] = useState("Generating insight...");
+  const [guidance, setGuidance] = useState<{
+    status: string;
+    actions: string[];
+    nextEvent: string;
+    optionalOptimization: string | null;
+  } | null>(null);
+  const [estimatedRetirement, setEstimatedRetirement] = useState<number | null>(null);
 
-  useEffect(() => {
-    async function load() {
-      const data = await loadDashboardData();
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    const data = await loadDashboardData();
 
-      if (!data.user) {
-        window.location.href = "/login";
-        return;
-      }
-
-      setBudget(data.budget);
-      setBills(data.bills);
-      setExpenses(data.expenses);
-      setRecurringBills(data.recurringBills);
-      setLoading(false);
+    if (!data.user) {
+      window.location.href = "/login";
+      return;
     }
 
-    load();
+    setUserId(data.user.id);
+    setBudget(data.budget);
+    setBills(data.bills);
+    setExpenses(data.expenses);
+    setRecurringBills(data.recurringBills);
+    setLoading(false);
   }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    if (searchParams.get("updated") === "1") {
+      loadData();
+      window.history.replaceState(null, "", "/dashboard");
+    }
+  }, [searchParams, loadData]);
+
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === "visible") loadData();
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [loadData]);
+
+  useEffect(() => {
+    async function loadRetirementEstimate() {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || !budget) {
+        setEstimatedRetirement(null);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("retirement_profiles")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error || !data) {
+        setEstimatedRetirement(null);
+        return;
+      }
+      const n = (v: unknown) => (v == null || v === "" ? 0 : Number(v));
+      const accountsFromDb =
+        data.retirement_accounts && typeof data.retirement_accounts === "object"
+          ? data.retirement_accounts
+          : legacyToAccounts(data);
+
+      let profile: RetirementProfile = {
+        current_age: n(data.current_age),
+        retirement_age: n(data.retirement_age),
+        current_salary: n(data.current_salary) || getAnnualPay(budget),
+        annual_raise_percent: n(data.annual_raise_percent),
+        accounts: accountsFromDb,
+        annual_return_percent: n(data.annual_return_percent),
+        withdrawal_rate_percent: n(data.withdrawal_rate_percent),
+        social_security_monthly_estimate: n(data.social_security_monthly_estimate),
+        inflation_percent: n(data.inflation_percent),
+      };
+      const projection = runProjection(profile);
+      setEstimatedRetirement(projection?.total_portfolio ?? null);
+    }
+    loadRetirementEstimate();
+  }, [budget]);
+
+  const nextPayday = getNextPayday(budget);
+  const paydayForBills = nextPayday ?? budget?.next_payday ?? null;
 
   const upcomingBills = useMemo(() => {
     if (!budget) return [];
-
-    const today = new Date();
-    const payday = new Date(budget.next_payday);
-
-    today.setHours(0, 0, 0, 0);
-    payday.setHours(0, 0, 0, 0);
-
-    return bills.filter((bill) => {
-      const due = new Date(bill.due_date);
-      due.setHours(0, 0, 0, 0);
-
-      return !bill.archived && !bill.is_paid && due >= today && due <= payday;
-    });
-  }, [bills, budget]);
+    return getDashboardBillsBeforePayday(
+      recurringBills,
+      bills,
+      paydayForBills,
+      new Date()
+    );
+  }, [budget, recurringBills, bills, paydayForBills]);
 
   const billsTotal = upcomingBills.reduce(
     (sum, bill) => sum + Number(bill.amount),
@@ -79,345 +157,483 @@ export default function DashboardOverviewPage() {
     0
   );
 
-const expectedPaycheck = getExpectedPaycheck(budget);
+  const currentBalance = budget
+    ? Number(budget.balance) - expensesTotal
+    : 0;
 
-  const safeToSpend = budget
-  ? Number(budget.balance) + expectedPaycheck - billsTotal - expensesTotal
-  : 0;
+  const expectedPaycheck = getExpectedPaycheck(budget);
+  const monthlyPay = getMonthlyPay(budget);
 
-  const daysUntilPayday = budget ? getDaysUntil(budget.next_payday) : 0;
+  const goalsData = useMemo(
+    () => (userId ? loadUserGoals(userId) : null),
+    [userId]
+  );
+
+  const savePct = goalsData?.save_percent ?? 0;
+  const investPct = goalsData?.invest_percent ?? 0;
+
+  const monthlySavings = monthlyPay > 0 ? monthlyPay * (savePct / 100) : 0;
+  const monthlyInvesting = monthlyPay > 0 ? monthlyPay * (investPct / 100) : 0;
+
+  const goalsToSubtract = useMemo(() => {
+    if (!budget || monthlyPay <= 0) return 0;
+    return monthlySavings + monthlyInvesting;
+  }, [budget, monthlyPay, monthlySavings, monthlyInvesting]);
+
+  const savingsTimelines = useMemo(() => {
+    if (!userId || !budget) return [];
+    return getSavingsGoalTimelines(budget, goalsData ?? null, monthlySavings);
+  }, [userId, budget, goalsData, monthlySavings]);
+
+  const safeToSpend = Math.max(
+    0,
+    currentBalance - billsTotal - goalsToSubtract
+  );
+
+  const daysUntilPayday = nextPayday ? getDaysUntil(nextPayday) : 0;
 
   const dailySpendingLimit =
     daysUntilPayday > 0 ? safeToSpend / daysUntilPayday : safeToSpend;
 
-  const categoryTotals = useMemo(() => {
-    return expenses.reduce((acc, expense) => {
-      const category = expense.category || "Other";
-      acc[category] = (acc[category] || 0) + Number(expense.amount);
-      return acc;
-    }, {} as Record<string, number>);
-  }, [expenses]);
-
-  const categoryTotalsKey = useMemo(
-    () => JSON.stringify(categoryTotals),
-    [categoryTotals]
+  const safeToSpendStatus = getSafeToSpendStatus(
+    safeToSpend,
+    dailySpendingLimit,
+    daysUntilPayday
   );
 
+  const currentMonthCategoryTotals = useMemo(() => {
+    const now = new Date();
+    const thisYear = now.getFullYear();
+    const thisMonth = now.getMonth();
+
+    return expenses
+      .filter((e) => {
+        const d = new Date(e.created_at);
+        return d.getFullYear() === thisYear && d.getMonth() === thisMonth;
+      })
+      .reduce((acc, expense) => {
+        const category = expense.category || "Other";
+        acc[category] = (acc[category] || 0) + Number(expense.amount);
+        return acc;
+      }, {} as Record<string, number>);
+  }, [expenses]);
+
   useEffect(() => {
-    async function generateInsight() {
+    async function fetchGuidance() {
       if (!budget) return;
+
+      const goalsData = userId ? loadUserGoals(userId) : null;
+      const investPercent = goalsData?.invest_percent ?? 0;
+      const monthlyRetirement =
+        monthlyPay > 0 && investPercent > 0
+          ? Math.round((monthlyPay * investPercent) / 100)
+          : 0;
 
       try {
         const response = await fetch("/api/insights", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            balance: budget.balance,
+            balance: currentBalance,
             safeToSpend,
             billsTotal,
             expensesTotal,
             dailySpendingLimit,
-            nextPayday: budget.next_payday,
-            categories: categoryTotals,
+            nextPayday: nextPayday ?? budget?.next_payday ?? "",
+            daysUntilPayday,
+            expectedPaycheck,
+            upcomingBills: upcomingBills.map((b) => ({
+              name: b.name,
+              amount: Number(b.amount),
+              due_date: b.due_date,
+            })),
+            investPercent: goalsData?.invest_percent,
+            savePercent: goalsData?.save_percent,
+            monthlyRetirementContribution: monthlyRetirement,
           }),
         });
 
         const data = await response.json();
-        setInsight(data.insight || "Could not generate AI insight right now.");
+        setGuidance({
+          status: data.status ?? "Unable to load guidance.",
+          actions: Array.isArray(data.actions) ? data.actions : [],
+          nextEvent: data.nextEvent ?? "",
+          optionalOptimization: data.optionalOptimization ?? null,
+        });
       } catch {
-        setInsight("Could not generate AI insight right now.");
+        setGuidance({
+          status: "Could not load guidance.",
+          actions: ["Try again in a moment."],
+          nextEvent: "",
+          optionalOptimization: null,
+        });
       }
     }
 
-    generateInsight();
+    fetchGuidance();
   }, [
-    budget?.balance,
-    budget?.next_payday,
+    userId,
+    budget,
+    currentBalance,
+    nextPayday,
     safeToSpend,
     billsTotal,
     expensesTotal,
     dailySpendingLimit,
-    categoryTotalsKey,
+    daysUntilPayday,
+    expectedPaycheck,
+    monthlyPay,
+    upcomingBills,
   ]);
 
-  const chartData = budget
-    ? [
-        { name: "Balance", value: Number(budget.balance) },
-        { name: "Bills", value: billsTotal },
-        { name: "Expenses", value: expensesTotal },
-        { name: "Remaining", value: safeToSpend },
-      ]
-    : [];
-
-  const chartColors: Record<string, string> = {
-    Balance: "#3b82f6",
-    Bills: "#ef4444",
-    Expenses: "#f59e0b",
-    Remaining: "#10b981",
-  };
-
-  const recentCategories = Object.entries(categoryTotals)
+  const recentCategories = Object.entries(currentMonthCategoryTotals)
     .sort((a, b) => Number(b[1]) - Number(a[1]))
     .slice(0, 3);
+
+  const insightAccent = getInsightAccent(safeToSpendStatus.status);
 
   if (loading) {
     return (
       <DashboardShell title="Overview" subtitle="Loading your dashboard...">
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <p className="text-slate-600">Loading...</p>
+        <div className="rounded-3xl border border-white/10 bg-slate-900/50 p-8 shadow-[0_10px_30px_-12px_rgba(15,23,42,0.8)] backdrop-blur-xl dark:bg-slate-950/60">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 animate-pulse rounded-2xl bg-emerald-500/20" />
+            <div className="space-y-2">
+              <div className="h-4 w-48 animate-pulse rounded bg-slate-700/80" />
+              <div className="h-3 w-32 animate-pulse rounded bg-slate-700/50" />
+            </div>
+          </div>
         </div>
       </DashboardShell>
     );
   }
 
+  const moreBillsCount = Math.max(0, upcomingBills.length - 3);
+  const topSpendSummary =
+    recentCategories.length === 0
+      ? null
+      : `${recentCategories
+          .slice(0, 2)
+          .map(([c, t]) => `${c} ${formatMoney(Number(t))}`)
+          .join(" · ")}${recentCategories.length > 2 ? ` · +${recentCategories.length - 2}` : ""}`;
+
   return (
     <DashboardShell
       title="Overview"
-      subtitle="Your money at a glance, without the clutter."
+      subtitle="One calm view of this pay period."
     >
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-[28px] bg-gradient-to-br from-emerald-500 to-emerald-600 p-6 text-white shadow-sm">
-          <p className="text-sm text-emerald-50">Safe to Spend</p>
-          <p className="mt-3 text-4xl font-bold tracking-tight">
-            {formatMoney(safeToSpend)}
-          </p>
-          <p className="mt-2 text-sm text-emerald-100">
-            Available before your next payday
-          </p>
-        </div>
+      <motion.div
+        variants={staggerContainer(reduce, 0.055, 0.05)}
+        initial="hidden"
+        animate="visible"
+        className="flex flex-col gap-8 pb-8"
+      >
+        <motion.div
+          variants={staggerContainer(reduce, 0.06, 0)}
+          initial="hidden"
+          animate="visible"
+          className="grid gap-6 lg:grid-cols-12 lg:items-stretch"
+        >
+          <motion.div variants={fadeUpItem(reduce)} className="lg:col-span-7">
+            <OverviewSafeToSpendHero
+              amountValue={safeToSpend}
+              untilLabel={nextPayday ? formatDate(nextPayday) : "payday"}
+              status={safeToSpendStatus.status}
+              badgeLabel={safeToSpendStatus.label}
+            />
+          </motion.div>
+          <motion.div variants={fadeUpItem(reduce)} className="lg:col-span-5">
+            <OverviewRetirementHero
+              formattedAmount={
+                estimatedRetirement != null && estimatedRetirement > 0
+                  ? formatMoney(estimatedRetirement)
+                  : "—"
+              }
+              hasEstimate={estimatedRetirement != null && estimatedRetirement > 0}
+              caption={
+                estimatedRetirement != null && estimatedRetirement > 0
+                  ? "Projected total at retirement."
+                  : "Add your profile to see a projection."
+              }
+            />
+          </motion.div>
+        </motion.div>
 
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <p className="text-sm text-slate-500">Current Balance</p>
-          <p className="mt-3 text-4xl font-bold tracking-tight text-slate-900">
-            {formatMoney(Number(budget?.balance || 0))}
-          </p>
-          <p className="mt-2 text-sm text-slate-400">
-            Your latest recorded balance
-          </p>
-        </div>
+        <motion.div
+          variants={staggerContainer(reduce, 0.05, 0)}
+          initial="hidden"
+          animate="visible"
+          className="grid gap-4 sm:grid-cols-3 sm:gap-6"
+        >
+          <OverviewGlassStat
+            label="Current balance"
+            value={formatMoney(currentBalance)}
+            subtext="After expenses you’ve logged."
+          />
+          <OverviewGlassStat
+            label="Next payday"
+            value={nextPayday ? formatDate(nextPayday) : "—"}
+            subtext={
+              <>
+                {daysUntilPayday} day{daysUntilPayday === 1 ? "" : "s"} out
+                {expectedPaycheck > 0 && <> · {formatMoney(expectedPaycheck)} expected</>}
+              </>
+            }
+          />
+          <OverviewGlassStat
+            label="Daily limit"
+            value={formatMoney(dailySpendingLimit)}
+            subtext="A steady pace until payday."
+          />
+        </motion.div>
 
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <p className="text-sm text-slate-500">Next Payday</p>
-          <p className="mt-3 text-4xl font-bold tracking-tight text-slate-900">
-            {budget ? formatDate(budget.next_payday) : "--"}
-          </p>
-          <p className="mt-2 text-sm text-slate-400">
-            {daysUntilPayday} day{daysUntilPayday === 1 ? "" : "s"} away
-          </p>
-        </div>
-
-        <div className="rounded-[28px] bg-gradient-to-br from-blue-600 to-indigo-600 p-6 text-white shadow-sm">
-          <p className="text-sm text-blue-100">Daily Limit</p>
-          <p className="mt-3 text-4xl font-bold tracking-tight">
-            {formatMoney(dailySpendingLimit)}
-          </p>
-          <p className="mt-2 text-sm text-blue-100">
-            Based on days left until payday
-          </p>
-        </div>
-      </div>
-
-      <div className="grid gap-6 2xl:grid-cols-[1.35fr_0.95fr]">
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-slate-900">
-                Cash Flow Snapshot
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                A quick view of where your money stands right now.
-              </p>
-            </div>
-
-            <Link
-              href="/dashboard/projection"
-              className="inline-flex rounded-2xl bg-slate-100 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-200"
-            >
-              View Projection
-            </Link>
-          </div>
-
-          <div className="mt-6 h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} barCategoryGap={30}>
-                <CartesianGrid
-                  vertical={false}
-                  strokeDasharray="3 3"
-                  stroke="#e2e8f0"
-                />
-                <XAxis
-                  dataKey="name"
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fill: "#64748b", fontSize: 13 }}
-                />
-                <YAxis
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fill: "#64748b", fontSize: 13 }}
-                />
-                <Tooltip
-                  cursor={{ fill: "rgba(148,163,184,0.08)" }}
-                  formatter={(value: number) => formatMoney(Number(value))}
-                  contentStyle={{
-                    borderRadius: "12px",
-                    border: "1px solid #e2e8f0",
-                    backgroundColor: "#ffffff",
-                  }}
-                />
-                <Bar dataKey="value" radius={[14, 14, 0, 0]}>
-                  {chartData.map((entry, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={chartColors[entry.name] || "#64748b"}
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-semibold text-slate-900">
-                AI Insight
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                Personalized guidance based on your current numbers.
-              </p>
-            </div>
-
-            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Live
-            </div>
-          </div>
-
-          <div className="mt-5 rounded-2xl bg-slate-50 p-5">
-            <p className="leading-8 text-slate-700">{insight}</p>
-          </div>
-
-          <Link
-            href="/dashboard/insights"
-            className="mt-6 inline-flex rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
+        <motion.div variants={fadeUpItem(reduce)}>
+          <OverviewWhatToDoNext
+            guidance={guidance}
+            financialStatus={safeToSpendStatus.status}
+            accent={insightAccent}
           >
-            Open Insights
-          </Link>
-        </div>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-slate-900">
-                Upcoming Bills
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                Bills due before your next payday.
-              </p>
-            </div>
-
-            <Link
-              href="/dashboard/bills"
-              className="text-sm font-semibold text-emerald-600 hover:text-emerald-700"
+            <MotionLink
+              href="/insights"
+              whileHover={
+                reduce
+                  ? undefined
+                  : { scale: 1.02, transition: { duration: 0.15, ease: EASE_OUT } }
+              }
+              whileTap={reduce ? undefined : { scale: 0.98 }}
+              className="inline-flex min-h-[2.75rem] items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors duration-150 ease-out hover:bg-emerald-500 motion-reduce:transition-none"
             >
-              Manage
-            </Link>
-          </div>
+              Insights
+            </MotionLink>
+            <MotionLink
+              href="/projection"
+              whileHover={
+                reduce
+                  ? undefined
+                  : { scale: 1.02, transition: { duration: 0.15, ease: EASE_OUT } }
+              }
+              whileTap={reduce ? undefined : { scale: 0.98 }}
+              className="inline-flex min-h-[2.75rem] items-center justify-center rounded-xl border border-white/10 px-5 py-2.5 text-sm font-medium text-slate-200 transition-colors duration-150 ease-out hover:border-white/20 hover:bg-white/[0.04] motion-reduce:transition-none"
+            >
+              Projection
+            </MotionLink>
+          </OverviewWhatToDoNext>
+        </motion.div>
 
-          <div className="mt-5 space-y-3">
-            {upcomingBills.slice(0, 4).map((bill) => (
-              <div
-                key={bill.id}
-                className="flex flex-col gap-3 rounded-2xl bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between"
+        <motion.div
+          variants={staggerContainer(reduce, 0.07, 0)}
+          initial="hidden"
+          animate="visible"
+          className="grid gap-6 xl:grid-cols-2"
+        >
+          <motion.div
+            variants={fadeUpItem(reduce)}
+            whileHover={
+              reduce
+                ? undefined
+                : {
+                    y: -3,
+                    boxShadow: "0 14px 40px -16px rgba(0,0,0,0.65)",
+                    borderColor: "rgba(255,255,255,0.12)",
+                    transition: { duration: 0.18, ease: EASE_OUT },
+                  }
+            }
+            whileTap={reduce ? undefined : { scale: 0.997 }}
+            className={panelClassName}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-base font-semibold tracking-tight text-slate-100">
+                Before payday
+              </h2>
+              <MotionLink
+                href="/bills"
+                whileHover={
+                  reduce
+                    ? undefined
+                    : { scale: 1.03, transition: { duration: 0.15, ease: EASE_OUT } }
+                }
+                whileTap={reduce ? undefined : { scale: 0.97 }}
+                className="shrink-0 rounded-lg px-2 py-1 text-sm font-medium text-emerald-400/90 hover:bg-emerald-500/10 hover:text-emerald-300"
               >
-                <div>
-                  <p className="font-medium text-slate-900">{bill.name}</p>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Due {formatDate(bill.due_date)}
-                  </p>
-                </div>
-
-                <div className="inline-flex w-fit rounded-full bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 ring-1 ring-slate-200">
-                  {formatMoney(Number(bill.amount))}
-                </div>
-              </div>
-            ))}
-
-            {upcomingBills.length === 0 && (
-              <div className="rounded-2xl bg-slate-50 p-5 text-slate-500">
-                No bills due before payday.
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="rounded-[28px] bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-slate-900">
-                Quick Stats
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                A simple summary of your current cycle.
-              </p>
+                Bills
+              </MotionLink>
             </div>
-
-            <Link
-              href="/dashboard/expenses"
-              className="text-sm font-semibold text-emerald-600 hover:text-emerald-700"
+            <motion.div
+              variants={staggerContainer(reduce, 0.04, 0)}
+              initial="hidden"
+              animate="visible"
+              className="mt-5 max-h-[14rem] space-y-2.5 overflow-y-auto pr-1 [scrollbar-gutter:stable]"
             >
-              View Expenses
-            </Link>
-          </div>
+              {upcomingBills.slice(0, 3).map((bill) => (
+                <motion.div
+                  key={bill.id}
+                  variants={fadeUpItem(reduce)}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-slate-900/30 px-4 py-3.5"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-slate-100">{bill.name}</p>
+                    <p className="text-xs text-slate-500">{formatDate(bill.due_date)}</p>
+                  </div>
+                  <p className="shrink-0 tabular-nums text-sm font-semibold text-emerald-200/90">
+                    {formatMoney(Number(bill.amount))}
+                  </p>
+                </motion.div>
+              ))}
 
-          <div className="mt-5 grid gap-3">
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm text-slate-500">Bills Before Payday</p>
-              <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
-                {formatMoney(billsTotal)}
-              </p>
-            </div>
+              {moreBillsCount > 0 ? (
+                <Link
+                  href="/bills"
+                  className="block py-2 text-center text-xs font-medium text-slate-500 hover:text-emerald-400/90"
+                >
+                  +{moreBillsCount} more
+                </Link>
+              ) : null}
 
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm text-slate-500">Total Expenses</p>
-              <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
-                {formatMoney(expensesTotal)}
-              </p>
-            </div>
-
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm text-slate-500">Recurring Bills</p>
-              <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
-                {recurringBills.length}
-              </p>
-            </div>
-
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm text-slate-500">Top Spending Categories</p>
-
-              {recentCategories.length > 0 ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {recentCategories.map(([category, total]) => (
-                    <div
-                      key={category}
-                      className="rounded-full bg-white px-3 py-1.5 text-sm font-medium text-slate-700 ring-1 ring-slate-200"
-                    >
-                      {category}: {formatMoney(Number(total))}
-                    </div>
-                  ))}
+              {upcomingBills.length === 0 && (
+                <div className="rounded-xl border border-dashed border-white/10 px-4 py-5 text-center">
+                  <p className="text-sm text-slate-300">No bills due in this window.</p>
+                  <Link href="/bills" className="mt-2 inline-block text-sm font-medium text-emerald-400">
+                    Add bills
+                  </Link>
                 </div>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">
-                  No spending categories yet.
+              )}
+            </motion.div>
+          </motion.div>
+
+          <motion.div
+            variants={fadeUpItem(reduce)}
+            whileHover={
+              reduce
+                ? undefined
+                : {
+                    y: -3,
+                    boxShadow: "0 14px 40px -16px rgba(0,0,0,0.65)",
+                    borderColor: "rgba(255,255,255,0.12)",
+                    transition: { duration: 0.18, ease: EASE_OUT },
+                  }
+            }
+            whileTap={reduce ? undefined : { scale: 0.997 }}
+            className={panelClassName}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-base font-semibold tracking-tight text-slate-100">This cycle</h2>
+              <MotionLink
+                href="/expenses"
+                whileHover={
+                  reduce
+                    ? undefined
+                    : { scale: 1.03, transition: { duration: 0.15, ease: EASE_OUT } }
+                }
+                whileTap={reduce ? undefined : { scale: 0.97 }}
+                className="shrink-0 rounded-lg px-2 py-1 text-sm font-medium text-sky-400/90 hover:bg-sky-500/10 hover:text-sky-300"
+              >
+                Expenses
+              </MotionLink>
+            </div>
+
+            <motion.div
+              variants={staggerContainer(reduce, 0.06, 0.02)}
+              initial="hidden"
+              animate="visible"
+              className="mt-6 flex flex-col gap-6 border-b border-white/[0.06] pb-6 sm:flex-row sm:items-start sm:justify-between sm:gap-10"
+            >
+              <motion.div variants={fadeUpItem(reduce)}>
+                <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                  Bills committed
                 </p>
+                <p className="mt-2 text-lg font-semibold tabular-nums tracking-tight text-slate-50 sm:text-xl">
+                  {formatMoney(billsTotal)}
+                </p>
+              </motion.div>
+              <motion.div variants={fadeUpItem(reduce)}>
+                <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                  Logged expenses
+                </p>
+                <p className="mt-2 text-lg font-semibold tabular-nums tracking-tight text-slate-50 sm:text-xl">
+                  {formatMoney(expensesTotal)}
+                </p>
+              </motion.div>
+            </motion.div>
+
+            {savingsTimelines.length > 0 ? (
+              <Link href="/goals" className="mt-4 block text-sm text-slate-400 transition hover:text-emerald-400/90">
+                <span className="text-slate-500">Goals · </span>
+                {savingsTimelines.length > 1
+                  ? `Next (${savingsTimelines.length} total): `
+                  : ""}
+                {savingsTimelines[0].name} — ~{formatDateMonthYear(savingsTimelines[0].targetDate)}
+              </Link>
+            ) : (
+              <Link href="/goals" className="mt-4 inline-block text-sm text-slate-500 hover:text-emerald-400/90">
+                Set a savings goal
+              </Link>
+            )}
+
+            <div className="mt-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                Top of month
+              </p>
+              {topSpendSummary ? (
+                <p className="mt-2 text-sm leading-snug text-slate-400">{topSpendSummary}</p>
+              ) : (
+                <p className="mt-2 text-sm text-slate-600">No category data yet.</p>
               )}
             </div>
-          </div>
-        </div>
-      </div>
+
+            <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2 border-t border-white/[0.06] pt-6 text-sm text-slate-500">
+              <MotionLink
+                href="/goals"
+                whileHover={reduce ? undefined : { color: "rgb(203 213 225)" }}
+                className="hover:text-slate-300"
+              >
+                Goals
+              </MotionLink>
+              <span className="text-slate-700" aria-hidden>
+                ·
+              </span>
+              <MotionLink
+                href="/retirement"
+                whileHover={reduce ? undefined : { color: "rgb(203 213 225)" }}
+                className="hover:text-slate-300"
+              >
+                Retirement
+              </MotionLink>
+              <span className="text-slate-700" aria-hidden>
+                ·
+              </span>
+              <MotionLink
+                href="/projection"
+                whileHover={reduce ? undefined : { color: "rgb(203 213 225)" }}
+                className="hover:text-slate-300"
+              >
+                Cash projection
+              </MotionLink>
+            </div>
+          </motion.div>
+        </motion.div>
+      </motion.div>
     </DashboardShell>
+  );
+}
+
+export default function DashboardOverviewPage() {
+  return (
+    <Suspense
+      fallback={
+        <DashboardShell
+          title="Overview"
+          subtitle="Loading..."
+          backHref="/dashboard"
+          backLabel="Overview"
+          compact
+        >
+          <div className="balnced-panel rounded-3xl p-6 sm:p-7">
+            <p className="text-slate-400">Loading...</p>
+          </div>
+        </DashboardShell>
+      }
+    >
+      <DashboardOverviewContent />
+    </Suspense>
   );
 }

@@ -39,6 +39,21 @@ export default function ExpensesPage() {
     }, {} as Record<string, number>);
   }, [expenses]);
 
+  const thisMonthTotal = useMemo(() => {
+    const now = new Date();
+    return expenses
+      .filter((e) => {
+        const d = new Date(e.created_at);
+        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+      })
+      .reduce((sum, e) => sum + Number(e.amount), 0);
+  }, [expenses]);
+
+  const topCategory = useMemo(() => {
+    const entries = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1]);
+    return entries[0] ?? null;
+  }, [categoryTotals]);
+
   async function addExpense(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
@@ -77,19 +92,24 @@ export default function ExpensesPage() {
   return (
     <DashboardShell
       title="Expenses"
-      subtitle="Track spending clearly and keep categories organized."
+      subtitle="Log spending to improve safe-to-spend and Insights."
+      backHref="/dashboard"
+      backLabel="Back to Overview"
+      compact
     >
-      <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-        <div className="rounded-3xl bg-white p-6 shadow-sm">
-          <h2 className="text-xl font-semibold text-slate-900">Add Expense</h2>
-
+      <div className="grid h-full min-h-0 gap-4 sm:gap-5 lg:grid-cols-3">
+        <div className="balnced-panel rounded-2xl p-5 sm:p-6">
+          <h2 className="text-base font-semibold text-slate-100">Add expense</h2>
+          <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+            Logging expenses improves your daily limit and guidance.
+          </p>
           <form onSubmit={addExpense} className="mt-4 space-y-3">
             <input
               type="text"
               placeholder="Expense name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-2xl border border-slate-200 p-3"
+              className="balnced-input"
               required
             />
             <input
@@ -98,13 +118,13 @@ export default function ExpensesPage() {
               placeholder="Amount"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              className="w-full rounded-2xl border border-slate-200 p-3"
+              className="balnced-input"
               required
             />
             <select
               value={category}
               onChange={(e) => setCategory(e.target.value)}
-              className="w-full rounded-2xl border border-slate-200 p-3"
+              className="balnced-input"
               required
             >
               <option value="">Select category</option>
@@ -117,68 +137,94 @@ export default function ExpensesPage() {
               <option value="Other">Other</option>
             </select>
 
-            <button className="rounded-2xl bg-emerald-500 px-5 py-3 font-medium text-white">
-              Add Expense
+            <button
+              type="submit"
+              className="w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500"
+            >
+              Add expense
             </button>
           </form>
         </div>
 
-        <div className="rounded-3xl bg-white p-6 shadow-sm">
-          <h2 className="text-xl font-semibold text-slate-900">By Category</h2>
-
-          <div className="mt-4 space-y-3">
-            {Object.entries(categoryTotals).map(([key, total]) => (
-              <div
-                key={key}
-                className="flex items-center justify-between rounded-2xl bg-slate-50 p-4"
-              >
-                <p className="font-medium text-slate-900">{key}</p>
-                <p className="font-semibold text-slate-900">
-                  {formatMoney(Number(total))}
+        <div className="flex min-h-0 flex-col overflow-hidden balnced-panel rounded-2xl p-5 sm:p-6">
+          <h2 className="shrink-0 text-base font-semibold text-slate-100">Category totals</h2>
+          <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+            All time. Feeds Insights and safe-to-spend.
+          </p>
+          {!loading && thisMonthTotal > 0 && (
+            <div className="mt-3 balnced-row rounded-xl p-4">
+              <p className="text-xs text-slate-500">This month</p>
+              <p className="mt-1 text-lg font-bold tabular-nums text-slate-100 sm:text-xl">
+                {formatMoney(thisMonthTotal)}
+              </p>
+              {topCategory && (
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Top: {topCategory[0]} {formatMoney(topCategory[1])}
                 </p>
+              )}
+            </div>
+          )}
+          <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
+            {Object.entries(categoryTotals)
+              .sort((a, b) => b[1] - a[1])
+              .map(([key, total]) => (
+                <div
+                  key={key}
+                  className="flex items-center justify-between balnced-row rounded-xl px-4 py-2.5"
+                >
+                  <span className="text-sm font-medium text-slate-100">{key}</span>
+                  <span className="text-sm font-semibold text-slate-100">
+                    {formatMoney(Number(total))}
+                  </span>
+                </div>
+              ))}
+          </div>
+          {!loading && Object.keys(categoryTotals).length === 0 && (
+            <div className="mt-4 rounded-xl border border-dashed border-white/15 p-5">
+              <p className="text-sm font-medium text-slate-200">No expenses yet</p>
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                Start logging to unlock category insights and better safe-to-spend.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex min-h-0 flex-col overflow-hidden balnced-panel rounded-2xl p-5 sm:p-6">
+          <h2 className="shrink-0 text-base font-semibold text-slate-100">Recent</h2>
+          <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+            {expenses.slice(0, 20).map((expense) => (
+              <div
+                key={expense.id}
+                className="flex items-center justify-between gap-3 balnced-row rounded-xl px-4 py-2.5"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-slate-100">{expense.name}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {expense.category ?? "Other"} · {formatDate(expense.created_at)}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="text-sm font-semibold text-slate-100">
+                    {formatMoney(Number(expense.amount))}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => deleteExpense(expense.id)}
+                    className="rounded-lg bg-rose-950/50 px-3 py-1.5 text-xs font-medium text-rose-300 ring-1 ring-rose-500/30 transition hover:bg-rose-900/50"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             ))}
-
-            {!loading && Object.keys(categoryTotals).length === 0 && (
-              <p className="text-slate-500">No expenses yet.</p>
-            )}
           </div>
-        </div>
-      </div>
-
-      <div className="rounded-3xl bg-white p-6 shadow-sm">
-        <h2 className="text-xl font-semibold text-slate-900">Recent Expenses</h2>
-
-        <div className="mt-4 space-y-3">
-          {expenses.map((expense) => (
-            <div
-              key={expense.id}
-              className="flex flex-col gap-3 rounded-2xl bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div>
-                <p className="font-medium text-slate-900">{expense.name}</p>
-                <p className="text-sm text-slate-500">
-                  {expense.category ? `${expense.category} • ` : ""}
-                  Added {formatDate(expense.created_at)}
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <p className="font-semibold text-slate-900">
-                  {formatMoney(Number(expense.amount))}
-                </p>
-                <button
-                  onClick={() => deleteExpense(expense.id)}
-                  className="rounded-xl bg-rose-100 px-3 py-2 text-sm font-medium text-rose-700"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
-
           {!loading && expenses.length === 0 && (
-            <p className="text-slate-500">No expenses recorded yet.</p>
+            <div className="mt-4 rounded-xl border border-dashed border-white/15 p-5">
+              <p className="text-sm font-medium text-slate-200">No expenses logged</p>
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                Add one with the form to the left. Recent entries show here.
+              </p>
+            </div>
           )}
         </div>
       </div>

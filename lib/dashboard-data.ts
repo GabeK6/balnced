@@ -1,16 +1,16 @@
 import { supabase } from "@/lib/supabase";
 
 export type Budget = {
-  id: string
+  id?: string
   balance: number
   paycheck: number
   next_payday: string
 
-  pay_type: "salary" | "hourly"
-  pay_frequency: "weekly" | "biweekly" | "twice_monthly" | "monthly"
+  pay_type?: "salary" | "hourly" | null
+  pay_frequency?: "weekly" | "biweekly" | "twice_monthly" | "monthly" | null
 
-  hourly_rate?: number
-  hours_worked?: number
+  hourly_rate?: number | null
+  hours_worked?: number | null
 };
 
 export type Bill = {
@@ -19,6 +19,8 @@ export type Bill = {
   amount: number;
   due_date: string;
   is_paid?: boolean;
+  /** When the user marked this row paid (optional column until migration applied). */
+  paid_at?: string | null;
   archived?: boolean;
   recurring_bill_id?: string | null;
   is_recurring?: boolean;
@@ -47,24 +49,294 @@ export type RecurringBill = {
   created_at?: string;
 };
 
-export function getExpectedPaycheck(budget: Budget | null) {
-  if (!budget) return 0
+/** Savings target; lower `priority` number is funded first (1 = top priority). */
+export type SavingsGoalItem = {
+  id: string;
+  name: string;
+  amount: number;
+  priority: number;
+};
+
+export type UserGoals = {
+  retirement_age: number;
+  invest_percent?: number;
+  save_percent?: number;
+  /** @deprecated Prefer savings_goals; kept in sync with priority-1 goal for older callers */
+  big_purchase_name?: string | null;
+  big_purchase_amount?: number | null;
+  savings_goals?: SavingsGoalItem[];
+};
+
+export function getExpectedPaycheck(budget: Budget | null): number {
+  if (!budget) return 0;
 
   if (budget.pay_type === "hourly") {
-    const rate = Number(budget.hourly_rate || 0)
-    const hours = Number(budget.hours_worked || 0)
-    return rate * hours
+    const rate = Number(budget.hourly_rate ?? 0);
+    const hours = Number(budget.hours_worked ?? 0);
+    return rate * hours;
   }
 
-  return Number(budget.paycheck || 0)
+  return Number(budget.paycheck ?? 0);
+}
+
+/** Pay frequency → number of paychecks per year. Use for annual ↔ per-paycheck conversion. */
+export function getPaychecksPerYear(
+  payFrequency: string | null | undefined
+): number {
+  switch (payFrequency) {
+    case "monthly":
+      return 12;
+    case "biweekly":
+      return 26;
+    case "weekly":
+      return 52;
+    case "twice_monthly":
+      return 24;
+    default:
+      return 26;
+  }
+}
+
+/** Pay frequency → number of paychecks per month. Single source of truth for conversion. */
+export function getPaychecksPerMonth(budget: Budget | null): number {
+  if (!budget?.pay_frequency) return 2;
+  const perYear = getPaychecksPerYear(budget.pay_frequency);
+  return perYear / 12;
+}
+
+/** Monthly take-home pay (same units as suggestedMonthlyInvest / suggestedMonthlySave). */
+export function getMonthlyPay(budget: Budget | null): number {
+  const paycheck = getExpectedPaycheck(budget);
+  const paychecksPerMonth = getPaychecksPerMonth(budget);
+  return paycheck * paychecksPerMonth;
+}
+
+/** Annual take-home pay derived from budget (paycheck × pay frequency). */
+export function getAnnualPay(budget: Budget | null): number {
+  return getMonthlyPay(budget) * 12;
+}
+
+/** Get future payday dates from a starting date using pay frequency. */
+export function getRecurringPaydays(
+  nextPayday: string,
+  payFrequency: string | null | undefined,
+  count: number
+): string[] {
+  if (!nextPayday || count < 1) return [];
+
+  const cursor = new Date(nextPayday);
+  if (Number.isNaN(cursor.getTime())) return [];
+
+  const dates: string[] = [];
+  let cur = new Date(cursor);
+  cur.setHours(0, 0, 0, 0);
+  const dayOfMonth = cur.getDate();
+
+  const freq = payFrequency || "";
+
+  for (let i = 0; i < count; i++) {
+    dates.push(toDateOnly(cur));
+
+    if (freq === "weekly") {
+      cur.setDate(cur.getDate() + 7);
+    } else if (freq === "biweekly" || freq === "twice_monthly") {
+      cur.setDate(cur.getDate() + 14);
+    } else if (freq === "monthly") {
+      cur.setMonth(cur.getMonth() + 1);
+      const lastDay = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
+      cur.setDate(Math.min(dayOfMonth, lastDay));
+    } else {
+      break;
+    }
+  }
+
+  return dates;
+}
+
+/** Get the next payday (today or in the future), auto-advancing if stored date is in the past. */
+export function getNextPayday(budget: Budget | null): string | null {
+  if (!budget?.next_payday) return null;
+
+  const stored = new Date(budget.next_payday);
+  if (Number.isNaN(stored.getTime())) return budget.next_payday;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  stored.setHours(0, 0, 0, 0);
+
+  if (stored >= today) return budget.next_payday;
+
+  const upcoming = getRecurringPaydays(budget.next_payday, budget.pay_frequency ?? null, 12);
+  if (!upcoming.length) return budget.next_payday;
+
+  const next = upcoming.find((d) => new Date(d) >= today);
+  return next ?? upcoming[upcoming.length - 1] ?? budget.next_payday;
+}
+
+/**
+ * Parse `YYYY-MM-DD` as a local calendar date.
+ * `new Date("YYYY-MM-DD")` is treated as UTC midnight and shifts a day in western zones.
+ */
+export function parseDateOnlyLocal(dateString: string): Date | null {
+  const s = String(dateString ?? "").trim();
+  const ymd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (ymd) {
+    const y = Number(ymd[1]);
+    const m = Number(ymd[2]) - 1;
+    const d = Number(ymd[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    const dt = new Date(y, m, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) return null;
+    return dt;
+  }
+  const t = new Date(s);
+  return Number.isNaN(t.getTime()) ? null : t;
 }
 
 export function formatDate(dateString: string) {
-  return new Date(dateString).toLocaleDateString();
+  const d = parseDateOnlyLocal(dateString);
+  if (!d) return String(dateString);
+  return d.toLocaleDateString();
+}
+
+export function formatDateMonthYear(date: Date) {
+  return date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+export function formatDateShort(dateString: string) {
+  const d = parseDateOnlyLocal(dateString);
+  if (!d) return String(dateString);
+  const month = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  const year = d.getFullYear();
+  return `${month}/${day}/${year}`;
 }
 
 export function formatMoney(value: number) {
-  return `$${Number(value).toFixed(2)}`;
+  const n = Number.isFinite(value) ? Number(value) : 0;
+  return n.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+/** Active savings goals sorted by priority (1 = fund first). Uses `savings_goals` or legacy big purchase fields. */
+export function getEffectiveSavingsGoals(goals: UserGoals | null): SavingsGoalItem[] {
+  if (!goals) return [];
+  if (Array.isArray(goals.savings_goals) && goals.savings_goals.length > 0) {
+    return [...goals.savings_goals]
+      .filter((g) => (g.name ?? "").trim().length > 0 && Number(g.amount) > 0)
+      .sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
+      .map((g, i) => ({
+        ...g,
+        name: (g.name ?? "").trim(),
+        amount: Number(g.amount),
+        priority: i + 1,
+      }));
+  }
+  if (
+    goals.big_purchase_name?.trim() &&
+    goals.big_purchase_amount != null &&
+    Number(goals.big_purchase_amount) > 0
+  ) {
+    return [
+      {
+        id: "legacy-big-purchase",
+        name: goals.big_purchase_name.trim(),
+        amount: Number(goals.big_purchase_amount),
+        priority: 1,
+      },
+    ];
+  }
+  return [];
+}
+
+export type SavingsGoalTimeline = {
+  id: string;
+  name: string;
+  amount: number;
+  targetDate: Date;
+  months: number;
+  priority: number;
+};
+
+/**
+ * Waterfall timelines: full monthly save rate goes to priority 1 until met, then priority 2, etc.
+ */
+export function getSavingsGoalTimelines(
+  budget: Budget | null,
+  goals: UserGoals | null,
+  monthlySavingsOverride?: number
+): SavingsGoalTimeline[] {
+  const list = getEffectiveSavingsGoals(goals);
+  if (!list.length) return [];
+
+  let monthlySavings = monthlySavingsOverride;
+
+  if (monthlySavings == null && budget && goals) {
+    const monthlyPay = getMonthlyPay(budget);
+    const savePct = goals.save_percent ?? 0;
+    monthlySavings = monthlyPay * (savePct / 100);
+  }
+
+  if (!monthlySavings || monthlySavings <= 0) return [];
+
+  let offsetMonths = 0;
+  const out: SavingsGoalTimeline[] = [];
+  for (const g of list) {
+    const amount = Number(g.amount);
+    if (!amount || amount <= 0) continue;
+    const months = Math.ceil(amount / monthlySavings);
+    offsetMonths += months;
+    const targetDate = new Date();
+    targetDate.setMonth(targetDate.getMonth() + offsetMonths);
+    out.push({
+      id: g.id,
+      name: g.name,
+      amount,
+      months,
+      targetDate,
+      priority: g.priority,
+    });
+  }
+  return out;
+}
+
+/** First milestone only (backward compatible with single-goal UI helpers). */
+export function getSavingsTimeline(
+  budget: Budget | null,
+  goals: UserGoals | null,
+  monthlySavingsOverride?: number
+): { name: string; amount: number; targetDate: Date; months: number } | null {
+  const rows = getSavingsGoalTimelines(budget, goals, monthlySavingsOverride);
+  const first = rows[0];
+  if (!first) return null;
+  return {
+    name: first.name,
+    amount: first.amount,
+    targetDate: first.targetDate,
+    months: first.months,
+  };
+}
+
+/** Set legacy big_purchase_* from the highest-priority goal for API compatibility. */
+export function withSyncedLegacyBigPurchase(goals: UserGoals): UserGoals {
+  const sorted = getEffectiveSavingsGoals(goals);
+  const top = sorted[0];
+  if (!top) {
+    return {
+      ...goals,
+      big_purchase_name: null,
+      big_purchase_amount: null,
+    };
+  }
+  return {
+    ...goals,
+    big_purchase_name: top.name,
+    big_purchase_amount: top.amount,
+  };
 }
 
 export function toDateOnly(date: Date) {
@@ -82,7 +354,7 @@ export function addDays(base: Date, days: number) {
 
 export function getDaysUntil(dateString: string) {
   const today = new Date();
-  const target = new Date(dateString);
+  const target = parseDateOnlyLocal(dateString) ?? new Date(dateString);
 
   today.setHours(0, 0, 0, 0);
   target.setHours(0, 0, 0, 0);
@@ -143,7 +415,9 @@ export async function generateRecurringBills(
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const sixtyDaysOut = addDays(today, 60);
+  const ninetyDaysOut = addDays(today, 90);
+  /** Past anchors (e.g. “monthly on the 1st” before today) must get real `bills` rows; otherwise Overdue stays “Planned” and paid toggles have nothing to update. */
+  const lookback = addDays(today, -400);
 
   const { data: existingBillsData, error: existingBillsError } = await supabase
     .from("bills")
@@ -156,9 +430,17 @@ export async function generateRecurringBills(
     return;
   }
 
+  /** Match keys on calendar date only (DB may return ISO timestamps). */
+  function dueKey(iso: string | null | undefined): string {
+    if (iso == null || iso === "") return "";
+    const s = String(iso).trim();
+    const ymd = s.match(/^(\d{4}-\d{2}-\d{2})/);
+    return ymd ? ymd[1] : toDateOnly(new Date(s));
+  }
+
   const existingKeys = new Set(
     (existingBillsData || []).map(
-      (bill) => `${bill.recurring_bill_id}-${bill.due_date}`
+      (bill) => `${bill.recurring_bill_id}-${dueKey(bill.due_date)}`
     )
   );
 
@@ -167,28 +449,41 @@ export async function generateRecurringBills(
   for (const recurringBill of recurringBills) {
     if (!recurringBill.active) continue;
 
-    const startDate = recurringBill.start_date
+    const templateStart = recurringBill.start_date
       ? new Date(recurringBill.start_date)
-      : new Date(today);
+      : lookback;
+    templateStart.setHours(0, 0, 0, 0);
 
-    const effectiveStart = startDate > today ? startDate : today;
+    let effectiveStart: Date;
+    if (templateStart.getTime() > today.getTime()) {
+      effectiveStart = templateStart;
+    } else {
+      effectiveStart =
+        templateStart.getTime() > lookback.getTime() ? templateStart : lookback;
+    }
 
     const endDate = recurringBill.end_date
       ? new Date(recurringBill.end_date)
-      : sixtyDaysOut;
+      : ninetyDaysOut;
 
-    const effectiveEnd = endDate < sixtyDaysOut ? endDate : sixtyDaysOut;
+    const effectiveEnd = endDate < ninetyDaysOut ? endDate : ninetyDaysOut;
 
     if (effectiveStart > effectiveEnd) continue;
 
     let occurrences: string[] = [];
 
-    if (recurringBill.frequency === "monthly" && recurringBill.day_of_month) {
-      occurrences = getMonthlyOccurrences(
-        recurringBill.day_of_month,
-        effectiveStart,
-        effectiveEnd
-      );
+    if (
+      recurringBill.frequency === "monthly" &&
+      recurringBill.day_of_month != null
+    ) {
+      const dom = Number(recurringBill.day_of_month);
+      if (dom >= 1 && dom <= 31) {
+        occurrences = getMonthlyOccurrences(
+          dom,
+          effectiveStart,
+          effectiveEnd
+        );
+      }
     }
 
     if (
@@ -218,14 +513,14 @@ export async function generateRecurringBills(
     }
 
     for (const dueDate of occurrences) {
-      const key = `${recurringBill.id}-${dueDate}`;
+      const key = `${recurringBill.id}-${dueKey(dueDate)}`;
       if (existingKeys.has(key)) continue;
 
       rowsToInsert.push({
         user_id: userId,
         name: recurringBill.name,
         amount: Number(recurringBill.amount),
-        due_date: dueDate,
+        due_date: dueKey(dueDate) || dueDate,
         is_paid: false,
         archived: false,
         recurring_bill_id: recurringBill.id,
@@ -253,7 +548,7 @@ export async function loadDashboardData() {
 
   const { data: budgetData } = await supabase
     .from("budgets")
-    .select("balance, paycheck, next_payday")
+    .select("balance, paycheck, next_payday, pay_type, pay_frequency, hourly_rate, hours_worked")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -291,4 +586,68 @@ export async function loadDashboardData() {
     expenses: (expensesData || []) as Expense[],
     recurringBills,
   };
+}
+
+const GOALS_STORAGE_KEY = "balnced_user_goals";
+
+function normalizeStoredSavingsGoals(raw: unknown): SavingsGoalItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const items = raw
+    .map((x: unknown, i: number) => {
+      const o = x as Record<string, unknown>;
+      return {
+        id: typeof o?.id === "string" && o.id ? o.id : `goal-${i}`,
+        name: String(o?.name ?? "").trim(),
+        amount: Math.max(0, Number(o?.amount) || 0),
+        priority: Number.isFinite(Number(o?.priority)) ? Number(o.priority) : i + 1,
+      };
+    })
+    .filter((g) => g.name.length > 0 && g.amount > 0)
+    .sort((a, b) => a.priority - b.priority)
+    .map((g, i) => ({ ...g, priority: i + 1 }));
+  return items.length ? items : undefined;
+}
+
+export function loadUserGoals(userId: string): UserGoals | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(`${GOALS_STORAGE_KEY}_${userId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as UserGoals;
+    let savings_goals = normalizeStoredSavingsGoals(parsed.savings_goals);
+    if (!savings_goals?.length && parsed.big_purchase_name?.trim()) {
+      const amt = parsed.big_purchase_amount != null ? Number(parsed.big_purchase_amount) : 0;
+      if (amt > 0) {
+        savings_goals = [
+          {
+            id: "migrated",
+            name: String(parsed.big_purchase_name).trim(),
+            amount: amt,
+            priority: 1,
+          },
+        ];
+      }
+    }
+    const base: UserGoals = {
+      retirement_age: Number(parsed.retirement_age) || 65,
+      invest_percent: parsed.invest_percent != null ? Number(parsed.invest_percent) : undefined,
+      save_percent: parsed.save_percent != null ? Number(parsed.save_percent) : undefined,
+      big_purchase_name: parsed.big_purchase_name ?? null,
+      big_purchase_amount:
+        parsed.big_purchase_amount != null ? Number(parsed.big_purchase_amount) : null,
+      savings_goals,
+    };
+    return withSyncedLegacyBigPurchase(base);
+  } catch {
+    return null;
+  }
+}
+
+export function saveUserGoals(userId: string, goals: UserGoals): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(`${GOALS_STORAGE_KEY}_${userId}`, JSON.stringify(goals));
+  } catch {
+    // ignore
+  }
 }
