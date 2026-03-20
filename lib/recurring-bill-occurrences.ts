@@ -253,6 +253,10 @@ export function billIsPaid(b: Bill | undefined | null): boolean {
   const v = b.is_paid as unknown;
   if (v === true || v === 1 || v === "true" || v === "t" || v === "T" || v === "1")
     return true;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "yes" || s === "y" || s === "on") return true;
+  }
   if (
     v === false ||
     v === 0 ||

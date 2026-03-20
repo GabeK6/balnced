@@ -28,19 +28,34 @@ function occurrenceUiKey(occ: EnrichedOccurrence): string {
   return `${occ.recurringBill.id}:${normalizeBillDueDate(occ.dueDate)}`;
 }
 
-/** PostgREST RPC return shapes vary by Postgres type (int, bigint-as-string, etc.). */
+/**
+ * PostgREST / Supabase RPC often returns a bare number, but some setups return
+ * bigint-as-string, one-key objects, or single-element arrays — which used to look
+ * like "0 rows" and skip the success path.
+ */
 function parseRpcAffectedRows(data: unknown): number {
   if (data == null) return 0;
-  if (typeof data === "number" && Number.isFinite(data)) return data;
+  if (typeof data === "number" && Number.isFinite(data))
+    return Math.max(0, Math.trunc(data));
   if (typeof data === "string" && data.trim() !== "") {
     const n = Number(data);
-    return Number.isFinite(n) ? n : 0;
+    return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
   }
-  if (typeof data === "object" && data !== null && "count" in (data as object)) {
-    return parseRpcAffectedRows((data as { count: unknown }).count);
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const n = parseRpcAffectedRows(item);
+      if (n > 0) return n;
+    }
+    return 0;
+  }
+  if (typeof data === "object" && data !== null) {
+    for (const v of Object.values(data as Record<string, unknown>)) {
+      const n = parseRpcAffectedRows(v);
+      if (n > 0) return n;
+    }
   }
   const n = Number(data);
-  return Number.isFinite(n) ? n : 0;
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
 }
 
 export default function BillsPage() {
@@ -85,14 +100,14 @@ export default function BillsPage() {
 
   const refetchBills = useCallback(async (): Promise<Bill[] | null> => {
     const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    if (!session?.user) return null;
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return null;
 
     const { data, error } = await supabase
       .from("bills")
       .select("*")
-      .eq("user_id", session.user.id)
+      .eq("user_id", user.id)
       .eq("archived", false)
       .order("due_date", { ascending: true });
 
@@ -154,10 +169,10 @@ export default function BillsPage() {
       const findLedgerIdsForOccurrence = async (): Promise<string[]> => {
         const { data: candidates, error: qErr } = await supabase
           .from("bills")
-          .select("id, due_date")
+          .select("id, due_date, recurring_bill_id")
           .eq("user_id", user.id)
-          .eq("recurring_bill_id", occ.recurringBill.id)
-          .eq("archived", false);
+          .eq("archived", false)
+          .not("recurring_bill_id", "is", null);
         if (qErr) {
           console.error(qErr);
           const msg = qErr.message || "Could not look up bill.";
@@ -167,7 +182,11 @@ export default function BillsPage() {
         }
         const ids =
           candidates
-            ?.filter((r) => ledgerDueMatchesOccurrence(r.due_date, want))
+            ?.filter(
+              (r) =>
+                recurringBillIdsMatch(r.recurring_bill_id, occ.recurringBill.id) &&
+                ledgerDueMatchesOccurrence(r.due_date, want)
+            )
             .map((r) => String(r.id)) ?? [];
         const idSet = new Set(ids);
         if (occ.billId) idSet.add(String(occ.billId));
@@ -255,6 +274,16 @@ export default function BillsPage() {
         return verifyLedgerReflectsPaid(list);
       };
 
+      /** When strict verify fails, accept server row if it clearly matches this occurrence. */
+      const refetchMatchesOccurrence = async (): Promise<boolean> => {
+        const list = await refetchBills();
+        if (!list?.length) return false;
+        return list.some((b) => {
+          if (!ledgerRowsMatchOccurrence(b)) return false;
+          return paid ? billIsPaid(b) : !billIsPaid(b);
+        });
+      };
+
       /** DB-side update (runs as owner); avoids RLS/PostgREST edge cases. Requires migration SQL. */
       const rpcUpdateOccurrence = async (): Promise<{
         ok: boolean;
@@ -288,12 +317,15 @@ export default function BillsPage() {
         await new Promise((r) => setTimeout(r, 200));
         if (await tryFinish()) return true;
         /**
-         * RPC already updated `is_paid` (SECURITY DEFINER). If verify still fails, it is
-         * almost always client-side ID/date matching drift — refresh data and continue.
+         * RPC already updated `is_paid` (SECURITY DEFINER). If strict verify fails, do not
+         * patch from stale `prev` (that can drop rows). Refetch only.
          */
         console.warn(
-          "set_bill_occurrence_paid: post-RPC verify mismatch; refetching (DB update already applied)"
+          "set_bill_occurrence_paid: verify mismatch after RPC; refetching (DB update already applied)"
         );
+        await refetchBills();
+        if (await refetchMatchesOccurrence()) return true;
+        await new Promise((r) => setTimeout(r, 250));
         await refetchBills();
         return true;
       }
@@ -340,6 +372,7 @@ export default function BillsPage() {
       }
 
       if (await tryFinish()) return true;
+      if (await refetchMatchesOccurrence()) return true;
 
       const msg =
         "Could not confirm bill was saved. Add column if missing: alter table public.bills add column if not exists is_paid boolean default false;";
@@ -432,9 +465,9 @@ export default function BillsPage() {
 
   async function toggleBillPaid(id: string, currentValue: boolean) {
     const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    if (!session?.user) {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
       alert("You need to be signed in to update bills.");
       return;
     }
@@ -444,7 +477,7 @@ export default function BillsPage() {
       .from("bills")
       .update({ is_paid: nextPaid })
       .eq("id", id)
-      .eq("user_id", session.user.id);
+      .eq("user_id", user.id);
 
     if (error) {
       console.error(error);
@@ -505,7 +538,7 @@ export default function BillsPage() {
                 }
               })();
             }}
-            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[10px] font-bold leading-none focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+            className={`relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[10px] font-bold leading-none focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
               checked
                 ? "border-emerald-500 bg-emerald-600 text-white"
                 : "cursor-pointer border-slate-300 bg-transparent hover:border-slate-400 dark:border-slate-500 dark:hover:border-slate-400"
