@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Sparkles } from "lucide-react";
 import DashboardShell from "@/components/dashboard/shell";
+import DashboardPageHero, {
+  DASHBOARD_PAGE_SECTION_GAP,
+} from "@/components/dashboard/dashboard-page-hero";
+import { DashboardPageBreadcrumb } from "@/components/dashboard/dashboard-page-breadcrumb";
 import {
   loadDashboardData,
   loadUserGoals,
@@ -171,15 +176,54 @@ export default function InsightsPage() {
     refreshGuidance();
   }, [payloadKey, budget]);
 
+  const insightsHeroStats = useMemo(
+    () => [
+      {
+        label: "Safe to spend",
+        value: loading ? "…" : formatMoney(safeToSpend),
+        hint: "Until payday",
+      },
+      {
+        label: "Daily limit",
+        value: loading ? "…" : formatMoney(dailySpendingLimit),
+        hint:
+          !loading && daysUntilPayday > 0
+            ? `${daysUntilPayday} day${daysUntilPayday !== 1 ? "s" : ""} to payday`
+            : undefined,
+      },
+      {
+        label: "Status",
+        value: loading ? "…" : safeToSpendStatus.label,
+        hint: !loading ? "Based on runway vs. pace" : undefined,
+      },
+    ],
+    [
+      loading,
+      safeToSpend,
+      dailySpendingLimit,
+      daysUntilPayday,
+      safeToSpendStatus.label,
+    ]
+  );
+
   return (
     <DashboardShell
-      title="Insights"
-      subtitle="Status and next steps from your balance, bills, and payday."
-      backHref="/dashboard"
-      backLabel="Back to Overview"
+      title=""
+      subtitle=""
       compact
+      headerOverride={<DashboardPageBreadcrumb current="Insights" />}
     >
-      <div className="grid h-full min-h-0 gap-4 sm:gap-5 xl:grid-cols-[1.1fr_0.9fr]">
+      <div className={`flex min-h-0 flex-col ${DASHBOARD_PAGE_SECTION_GAP}`}>
+        <DashboardPageHero
+          eyebrow="Guidance"
+          title="Insights"
+          subtitle="Status and next steps from your balance, bills, and payday."
+          icon={Sparkles}
+          accent="slate"
+          stats={insightsHeroStats}
+        />
+
+      <div className="grid h-full min-h-0 gap-6 sm:gap-8 xl:grid-cols-[1.1fr_0.9fr]">
         <div className="flex min-h-0 flex-col overflow-hidden balnced-panel rounded-2xl p-5 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex min-w-0 flex-wrap items-center gap-2.5">
@@ -275,16 +319,19 @@ export default function InsightsPage() {
 
         <div className="flex min-h-0 flex-col overflow-hidden balnced-panel rounded-2xl p-5 sm:p-6">
           <h2 className="text-base font-semibold text-slate-100">
-            Snapshot
+            Balance context
           </h2>
+          <p className="mt-1 text-xs leading-relaxed text-slate-500">
+            How your cash, bills, and spending line up before payday.
+          </p>
 
           <div className="mt-4 space-y-3">
             <div className="balnced-row rounded-2xl p-4 sm:p-5">
               <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Safe to spend
+                Current balance
               </p>
               <p className="mt-2 text-lg font-bold tabular-nums text-slate-100 sm:text-xl">
-                {formatMoney(safeToSpend)}
+                {formatMoney(currentBalance)}
               </p>
             </div>
 
@@ -299,23 +346,15 @@ export default function InsightsPage() {
 
             <div className="balnced-row rounded-2xl p-4 sm:p-5">
               <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Total expenses
+                Total expenses (logged)
               </p>
               <p className="mt-2 text-lg font-bold tabular-nums text-slate-100 sm:text-xl">
                 {formatMoney(expensesTotal)}
               </p>
             </div>
-
-            <div className="balnced-row rounded-2xl p-4 sm:p-5">
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Daily limit
-              </p>
-              <p className="mt-2 text-lg font-bold tabular-nums text-slate-100 sm:text-xl">
-                {formatMoney(dailySpendingLimit)}
-              </p>
-            </div>
           </div>
         </div>
+      </div>
       </div>
     </DashboardShell>
   );

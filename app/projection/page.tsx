@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { LineChart as LineChartIcon } from "lucide-react";
 import DashboardShell from "@/components/dashboard/shell";
+import DashboardPageHero, {
+  DASHBOARD_PAGE_SECTION_GAP,
+} from "@/components/dashboard/dashboard-page-hero";
+import { DashboardPageBreadcrumb } from "@/components/dashboard/dashboard-page-breadcrumb";
 import {
   loadDashboardData,
   formatDate,
@@ -18,6 +23,11 @@ import {
   buildCashProjection,
   getWalletBalanceAfterExpenses,
 } from "@/lib/cash-projection";
+import ProFeatureTeaser from "@/components/dashboard/pro-feature-teaser";
+import { useUserPlan } from "@/hooks/use-user-plan";
+import { PRO_GATING_PLACEHOLDER_CLASS } from "@/lib/plan-ui";
+import ContextualUpgradeHint from "@/components/dashboard/contextual-upgrade-hint";
+import UpgradeModal from "@/components/dashboard/upgrade-modal";
 import {
   ResponsiveContainer,
   LineChart,
@@ -34,6 +44,14 @@ export default function ProjectionPage() {
   const [recurringBills, setRecurringBills] = useState<RecurringBill[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
+  const {
+    planAccess,
+    refresh: refreshPlanAccess,
+    loading: planLoading,
+    hasProAccess,
+  } = useUserPlan();
+  const isPro = !planLoading && hasProAccess;
 
   useEffect(() => {
     async function load() {
@@ -123,53 +141,85 @@ export default function ProjectionPage() {
     };
   }, [budget, nextPayday, expectedPaycheck]);
 
+  const projectionHeroStats = [
+    {
+      label: "Current balance",
+      value: loading ? "…" : formatMoney(currentBalance),
+      hint: "After logged expenses",
+    },
+    {
+      label: "After next paycheck",
+      value: loading ? "…" : formatMoney(projectedAfterPayday),
+      hint: loading ? undefined : `+${formatMoney(expectedPaycheck)} paycheck`,
+    },
+    {
+      label: "Bills before payday",
+      value: loading
+        ? "…"
+        : `${billLinesBeforeNextPaydayCount} bill${billLinesBeforeNextPaydayCount !== 1 ? "s" : ""}`,
+      hint:
+        sumBillsBeforeNextPayday > 0
+          ? `${formatMoney(sumBillsBeforeNextPayday)} total due`
+          : "None in window",
+    },
+  ];
+
   return (
     <DashboardShell
-      title="Projection"
-      subtitle="Starting from your current balance (after logged expenses), minus bills due before payday, plus your next paycheck."
-      backHref="/dashboard"
-      backLabel="Back to Overview"
+      title=""
+      subtitle=""
       compact
+      headerOverride={<DashboardPageBreadcrumb current="Projection" />}
     >
-      <div className="flex h-full min-h-0 flex-col gap-4">
-        <div className="grid shrink-0 gap-4 md:grid-cols-3">
-          <div className="balnced-panel rounded-2xl p-5 sm:p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Projected before next payday
-            </p>
-            <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight text-slate-100 sm:text-[1.65rem]">
-              {formatMoney(projectedBeforePayday)}
-            </p>
-            <p className="mt-2 text-xs leading-relaxed text-slate-500">
-              Current {formatMoney(currentBalance)}
-              {sumBillsBeforeNextPayday > 0
-                ? ` · Bills −${formatMoney(sumBillsBeforeNextPayday)}`
-                : ""}
-            </p>
-          </div>
+      <div className={`flex h-full min-h-0 flex-col ${DASHBOARD_PAGE_SECTION_GAP}`}>
+        <DashboardPageHero
+          eyebrow="Cash runway"
+          title="Projection"
+          subtitle="Starting from your current balance (after logged expenses), minus bills due before payday, plus your next paycheck."
+          icon={LineChartIcon}
+          accent="cyan"
+          stats={projectionHeroStats}
+        />
 
-          <div className="balnced-panel rounded-2xl p-5 sm:p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Projected after next payday
-            </p>
-            <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight text-slate-100 sm:text-[1.65rem]">
-              {formatMoney(projectedAfterPayday)}
-            </p>
-            <p className="mt-2 text-xs leading-relaxed text-slate-500">
-              +{formatMoney(expectedPaycheck)} paycheck
-            </p>
-          </div>
+        {!loading && !planLoading && !hasProAccess ? (
+          <ContextualUpgradeHint
+            hintId="projection_page"
+            subline="Chart, timeline, and pay schedule are on Pro."
+            onOpenDetails={() => setUpgradeModalOpen(true)}
+          />
+        ) : null}
+        <UpgradeModal
+          open={upgradeModalOpen}
+          onClose={() => setUpgradeModalOpen(false)}
+          planAccess={planAccess}
+          loadingPlan={loading || planLoading}
+          onRefresh={refreshPlanAccess}
+        />
 
-          <div className="balnced-panel rounded-2xl p-5 sm:p-6">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Bills due before payday
-            </p>
-            <p className="mt-3 text-2xl font-bold tabular-nums text-slate-100 sm:text-[1.65rem]">
-              {billLinesBeforeNextPaydayCount}
-            </p>
-          </div>
+        <div className="balnced-panel rounded-2xl border border-white/[0.08] bg-slate-950/35 p-5 sm:p-6">
+          <p className="text-[0.65rem] font-semibold uppercase tracking-wider text-slate-500">
+            Before next payday
+          </p>
+          <p className="mt-2 text-2xl font-bold tabular-nums tracking-tight text-slate-100 sm:text-[1.65rem]">
+            {loading ? "…" : formatMoney(projectedBeforePayday)}
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-slate-500">
+            {!loading ? (
+              <>
+                Current {formatMoney(currentBalance)}
+                {sumBillsBeforeNextPayday > 0
+                  ? ` · Bills −${formatMoney(sumBillsBeforeNextPayday)}`
+                  : ""}
+              </>
+            ) : (
+              "Loading…"
+            )}
+          </p>
         </div>
 
+        {planLoading ? (
+          <div className={`w-full ${PRO_GATING_PLACEHOLDER_CLASS}`} aria-hidden />
+        ) : isPro ? (
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-2">
           <div className="flex min-h-0 flex-col overflow-hidden balnced-panel rounded-2xl p-5 sm:p-6">
             <h2 className="shrink-0 text-base font-semibold text-slate-100">
@@ -282,9 +332,11 @@ export default function ProjectionPage() {
             </div>
           </div>
         </div>
-      </div>
+        ) : (
+          <ProFeatureTeaser title="Full projection runway" surface="projection" />
+        )}
 
-      {payScheduleForecast && (
+      {payScheduleForecast && isPro && (
         <div className="balnced-panel rounded-2xl p-5 sm:p-6">
           <h2 className="text-base font-semibold text-slate-100">
             Pay schedule forecast
@@ -341,6 +393,7 @@ export default function ProjectionPage() {
           </div>
         </div>
       )}
+      </div>
     </DashboardShell>
   );
 }

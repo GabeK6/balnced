@@ -64,6 +64,22 @@ export function recurringBillIdsMatch(
 }
 
 /**
+ * Canonical key: normalized recurring template id + calendar due date (YYYY-MM-DD).
+ * Use for paid vs unpaid occurrence matching so duplicate ledger rows still align.
+ */
+export function occurrenceOccurrenceKey(
+  recurringBillId: string | null | undefined,
+  dueYmd: string
+): string {
+  const normId = String(recurringBillId ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "");
+  const normDue = normalizeBillDueDate(dueYmd);
+  return `${normId}|${normDue}`;
+}
+
+/**
  * Aligns with RPC `left(b.due_date::text, 10) = want` plus calendar-day checks.
  */
 export function ledgerDueMatchesOccurrence(
@@ -264,23 +280,88 @@ export function billIsPaid(b: Bill | undefined | null): boolean {
     v === "f" ||
     v === "F" ||
     v === null ||
-    v === undefined ||
     v === ""
   )
     return false;
+  // Omitted from JSON (e.g. stale PostgREST cache) — infer from paid_at when present.
+  const pa = b.paid_at;
+  if (pa != null && String(pa).trim() !== "") return true;
+  if (v === undefined) return false;
   return Boolean(v);
+}
+
+/** Paid occurrence keys from ledger — survives duplicate rows and due_date format drift. */
+export function buildPaidOccurrenceKeySet(bills: Bill[]): Set<string> {
+  const s = new Set<string>();
+  for (const b of bills) {
+    if (b.archived || !billIsPaid(b)) continue;
+    if (b.recurring_bill_id == null || String(b.recurring_bill_id).length === 0) continue;
+    const nd = normalizeBillDueDate(b.due_date);
+    if (!nd) continue;
+    s.add(occurrenceOccurrenceKey(b.recurring_bill_id, nd));
+  }
+  return s;
+}
+
+/**
+ * Single source of truth for “this recurring occurrence is paid in the ledger”
+ * (same key as getOverdueBills / enrich paid map).
+ * Pass `paidKeySet` from buildPaidOccurrenceKeySet(bills) to avoid rebuilding the set.
+ */
+export function hasPaidLedgerOccurrence(
+  bills: Bill[],
+  recurringBillId: string,
+  dueDateRaw: string,
+  paidKeySet?: Set<string>
+): boolean {
+  const want = normalizeBillDueDate(dueDateRaw);
+  if (!want) return false;
+  const k = occurrenceOccurrenceKey(recurringBillId, want);
+  const set = paidKeySet ?? buildPaidOccurrenceKeySet(bills);
+  if (set.has(k)) return true;
+  return bills.some(
+    (b) =>
+      !b.archived &&
+      billIsPaid(b) &&
+      recurringBillIdsMatch(b.recurring_bill_id, recurringBillId) &&
+      ledgerDueMatchesOccurrence(b.due_date, want)
+  );
+}
+
+const DEBUG_OCCURRENCE =
+  typeof process !== "undefined" && process.env.NODE_ENV === "development";
+
+function debugOccurrenceMatch(label: string, payload: Record<string, unknown>) {
+  if (!DEBUG_OCCURRENCE) return;
+  if (typeof window === "undefined" || sessionStorage.getItem("balnced_debug_occurrence") !== "1") {
+    return;
+  }
+  console.debug(`[balnced:occurrence] ${label}`, payload);
 }
 
 function enrich(
   bill: RecurringBill,
   dueDate: string,
-  bills: Bill[]
+  bills: Bill[],
+  paidOccurrenceKeys: Set<string>
 ): EnrichedOccurrence {
   const rows = findBillsForOccurrence(bills, bill.id, dueDate);
-  const anyPaid = rows.some((r) => billIsPaid(r));
+  const wantNorm = normalizeBillDueDate(dueDate);
+  const mapSaysPaid =
+    wantNorm.length > 0 &&
+    paidOccurrenceKeys.has(occurrenceOccurrenceKey(bill.id, wantNorm));
+  const anyPaid = rows.some((r) => billIsPaid(r)) || mapSaysPaid;
   const paidRow = rows.find((r) => billIsPaid(r));
   /** Prefer a paid row for delete/targeting when duplicates exist. */
   const primary = paidRow ?? rows[0];
+  if (mapSaysPaid && !rows.some((r) => billIsPaid(r))) {
+    debugOccurrenceMatch("enrich: paid map overrides row scan (likely duplicate / date mismatch)", {
+      templateId: bill.id,
+      dueDate,
+      wantNorm,
+      rowCount: rows.length,
+    });
+  }
   return {
     recurringBill: bill,
     dueDate,
@@ -294,13 +375,21 @@ export function sortByDueDateAsc<T extends { dueDate: string }>(items: T[]): T[]
   return [...items].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 }
 
-/** Paid recurring rows, most recently due first. */
+/** Paid recurring rows, most recently due first — one row per template + calendar due. */
 export function getPaidRecurringBills(bills: Bill[]): Bill[] {
-  return bills
-    .filter(
-      (b) => !b.archived && billIsPaid(b) && isRecurringBillRow(b)
-    )
-    .sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
+  const paid = bills.filter(
+    (b) => !b.archived && billIsPaid(b) && isRecurringBillRow(b)
+  );
+  const byKey = new Map<string, Bill>();
+  for (const b of paid) {
+    const rid = b.recurring_bill_id;
+    if (rid == null || String(rid).length === 0) continue;
+    const nd = normalizeBillDueDate(b.due_date);
+    if (!nd) continue;
+    const k = occurrenceOccurrenceKey(rid, nd);
+    if (!byKey.has(k)) byKey.set(k, b);
+  }
+  return [...byKey.values()].sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
 }
 
 /**
@@ -344,6 +433,12 @@ export function getOverdueBills(
 ): EnrichedOccurrence[] {
   const now0 = startOfDay(now);
   const out: EnrichedOccurrence[] = [];
+  const paidOccurrenceKeys = buildPaidOccurrenceKeySet(bills);
+
+  debugOccurrenceMatch("getOverdueBills: paid occurrence keys", {
+    count: paidOccurrenceKeys.size,
+    sample: [...paidOccurrenceKeys].slice(0, 30),
+  });
 
   for (const bill of recurring) {
     if (!isTemplateActive(bill)) continue;
@@ -364,7 +459,13 @@ export function getOverdueBills(
 
     if (!overdueDue) continue;
 
-    const row = enrich(bill, overdueDue, bills);
+    const occKey = occurrenceOccurrenceKey(bill.id, overdueDue);
+    if (paidOccurrenceKeys.has(occKey)) {
+      debugOccurrenceMatch("getOverdueBills: skip — in paid map", { occKey, name: bill.name });
+      continue;
+    }
+
+    const row = enrich(bill, overdueDue, bills, paidOccurrenceKeys);
     if (row.isPaid) continue;
     out.push(row);
   }
@@ -383,10 +484,12 @@ export function getUpcomingBills(
   const now0 = startOfDay(now);
   const monthEnd = startOfDay(endOfMonth(now));
   const overdueKeys = new Set(
-    getOverdueBills(recurring, bills, now).map(
-      (o) => `${o.recurringBill.id}:${o.dueDate}`
+    getOverdueBills(recurring, bills, now).map((o) =>
+      occurrenceOccurrenceKey(o.recurringBill.id, o.dueDate)
     )
   );
+
+  const paidOccurrenceKeys = buildPaidOccurrenceKeySet(bills);
 
   const out: EnrichedOccurrence[] = [];
 
@@ -409,10 +512,15 @@ export function getUpcomingBills(
     }
 
     if (!candidate) continue;
-    const key = `${bill.id}:${candidate}`;
+    const key = occurrenceOccurrenceKey(bill.id, candidate);
     if (overdueKeys.has(key)) continue;
 
-    const row = enrich(bill, candidate, bills);
+    if (paidOccurrenceKeys.has(key)) {
+      debugOccurrenceMatch("getUpcomingBills: skip — in paid map", { key, name: bill.name });
+      continue;
+    }
+
+    const row = enrich(bill, candidate, bills, paidOccurrenceKeys);
     if (row.isPaid) continue;
     out.push(row);
   }
@@ -518,9 +626,11 @@ export function getDashboardBillsInClosedRange(
     const nd = normalizeBillDueDate(b.due_date);
     if (!nd || nd < rsStr || nd > reStr) continue;
     if (b.recurring_bill_id != null && String(b.recurring_bill_id).length > 0) {
-      recurringKeyCovered.add(`${String(b.recurring_bill_id)}|${nd}`);
+      recurringKeyCovered.add(occurrenceOccurrenceKey(String(b.recurring_bill_id), nd));
     }
   }
+
+  const seenUnpaidRecurring = new Set<string>();
 
   for (const b of bills) {
     if (b.archived || billIsPaid(b)) continue;
@@ -530,6 +640,11 @@ export function getDashboardBillsInClosedRange(
       b.recurring_bill_id != null && String(b.recurring_bill_id).length > 0
         ? String(b.recurring_bill_id)
         : null;
+    if (recId) {
+      const occK = occurrenceOccurrenceKey(recId, nd);
+      if (seenUnpaidRecurring.has(occK)) continue;
+      seenUnpaidRecurring.add(occK);
+    }
     result.push({
       id: String(b.id),
       name: b.name,
@@ -542,7 +657,7 @@ export function getDashboardBillsInClosedRange(
   for (const tmpl of recurring) {
     if (!isTemplateActive(tmpl)) continue;
     for (const dueStr of listDueDatesInClosedRange(tmpl, rs, re)) {
-      const key = `${String(tmpl.id)}|${dueStr}`;
+      const key = occurrenceOccurrenceKey(String(tmpl.id), dueStr);
       if (recurringKeyCovered.has(key)) continue;
       recurringKeyCovered.add(key);
       result.push({
@@ -622,19 +737,157 @@ export function deriveBillOccurrences(
   return getDashboardBillsInClosedRange(templates, bills, rangeStart, rangeEnd);
 }
 
-/** Paid recurring rows with due date in the same calendar month as `now`. */
+/** Paid recurring rows with due date in the same calendar month as `now` — deduped per occurrence. */
 export function getPaidBillsThisMonth(bills: Bill[], now: Date = new Date()): Bill[] {
   const y = now.getFullYear();
   const m = now.getMonth();
-  return bills
-    .filter((b) => {
-      if (b.archived || !billIsPaid(b) || !isRecurringBillRow(b)) return false;
-      const nd = normalizeBillDueDate(b.due_date);
-      if (!nd) return false;
-      const d = localCalendarDay(nd);
-      return d.getFullYear() === y && d.getMonth() === m;
-    })
-    .sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
+  const inMonth = bills.filter((b) => {
+    if (b.archived || !billIsPaid(b) || !isRecurringBillRow(b)) return false;
+    const nd = normalizeBillDueDate(b.due_date);
+    if (!nd) return false;
+    const d = localCalendarDay(nd);
+    return d.getFullYear() === y && d.getMonth() === m;
+  });
+  const byKey = new Map<string, Bill>();
+  for (const b of inMonth) {
+    const rid = b.recurring_bill_id;
+    if (rid == null || String(rid).length === 0) continue;
+    const nd = normalizeBillDueDate(b.due_date);
+    if (!nd) continue;
+    const k = occurrenceOccurrenceKey(rid, nd);
+    if (!byKey.has(k)) byKey.set(k, b);
+  }
+  return [...byKey.values()].sort((a, b) => (b.due_date || "").localeCompare(a.due_date || ""));
+}
+
+/** Calendar days from `now`’s date to `dueYmd` (negative = due date is in the past). */
+export function daysFromTodayToDueDate(dueYmd: string, now: Date = new Date()): number {
+  const head = normalizeBillDueDate(dueYmd);
+  if (!head) return 0;
+  const today = startOfDay(now);
+  const due = startOfDay(localCalendarDay(head));
+  return Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Human-readable due timing for bill cards, e.g. "Due in 3 days", "3 days late".
+ */
+export function formatBillRelativeDue(dueYmd: string, now: Date = new Date()): string {
+  const delta = daysFromTodayToDueDate(dueYmd, now);
+  if (delta < 0) {
+    const n = Math.abs(delta);
+    return n === 1 ? "1 day late" : `${n} days late`;
+  }
+  if (delta === 0) return "Due Today";
+  if (delta === 1) return "Due Tomorrow";
+  return `Due in ${delta} days`;
+}
+
+/** Paid ledger rows: timing vs today without implying still overdue. */
+export function formatBillDueTimingPaid(dueYmd: string, now: Date = new Date()): string {
+  const delta = daysFromTodayToDueDate(dueYmd, now);
+  if (delta < 0) {
+    const n = Math.abs(delta);
+    return n === 1 ? "Was due yesterday" : `Was due ${n} days ago`;
+  }
+  if (delta === 0) return "Due date is today";
+  if (delta === 1) return "Due tomorrow";
+  return `Due in ${delta} days`;
+}
+
+/** Most urgent overdue = oldest due date first (longest past due). */
+export function sortOverdueMostUrgentFirst(occ: EnrichedOccurrence[]): EnrichedOccurrence[] {
+  return [...occ].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+}
+
+/** Soonest upcoming due first. */
+export function sortUpcomingSoonestFirst(occ: EnrichedOccurrence[]): EnrichedOccurrence[] {
+  return [...occ].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+}
+
+/**
+ * Split month-scoped upcoming bills: **this week** = due in 0–6 days from today (rolling),
+ * **later this month** = still this calendar month but beyond that window.
+ */
+export function partitionUpcomingThisWeekVsLater(
+  upcoming: EnrichedOccurrence[],
+  now: Date = new Date()
+): { thisWeek: EnrichedOccurrence[]; laterThisMonth: EnrichedOccurrence[] } {
+  const sorted = sortUpcomingSoonestFirst(upcoming);
+  const thisWeek: EnrichedOccurrence[] = [];
+  const laterThisMonth: EnrichedOccurrence[] = [];
+  for (const o of sorted) {
+    const delta = daysFromTodayToDueDate(o.dueDate, now);
+    if (delta >= 0 && delta <= 6) thisWeek.push(o);
+    else laterThisMonth.push(o);
+  }
+  return { thisWeek, laterThisMonth };
+}
+
+/** Calendar days past due (0 if not overdue). */
+export function daysPastDue(dueYmd: string, now: Date = new Date()): number {
+  const d = daysFromTodayToDueDate(dueYmd, now);
+  return d >= 0 ? 0 : Math.abs(d);
+}
+
+/**
+ * Overdue: **recent** = 1–7 days past due, **older** = 8+ days past due.
+ * Each bucket stays sorted most urgent first (oldest due date first).
+ */
+export function partitionOverdueByRecency(
+  overdue: EnrichedOccurrence[],
+  now: Date = new Date()
+): { recent: EnrichedOccurrence[]; older: EnrichedOccurrence[] } {
+  const sorted = sortOverdueMostUrgentFirst(overdue);
+  const recent: EnrichedOccurrence[] = [];
+  const older: EnrichedOccurrence[] = [];
+  for (const o of sorted) {
+    const late = daysPastDue(o.dueDate, now);
+    if (late <= 7) recent.push(o);
+    else older.push(o);
+  }
+  return { recent, older };
+}
+
+/**
+ * Within rolling “this week” (0–6 days out), split **next 2 days** (today + tomorrow)
+ * vs **rest of the week** (2–6 days out). Soonest due first within each.
+ */
+export function partitionThisWeekNextTwoVsRest(
+  thisWeek: EnrichedOccurrence[],
+  now: Date = new Date()
+): { nextTwoDays: EnrichedOccurrence[]; restOfWeek: EnrichedOccurrence[] } {
+  const sorted = sortUpcomingSoonestFirst(thisWeek);
+  const nextTwoDays: EnrichedOccurrence[] = [];
+  const restOfWeek: EnrichedOccurrence[] = [];
+  for (const o of sorted) {
+    const delta = daysFromTodayToDueDate(o.dueDate, now);
+    if (delta >= 0 && delta <= 1) nextTwoDays.push(o);
+    else restOfWeek.push(o);
+  }
+  return { nextTwoDays, restOfWeek };
+}
+
+export function sumEnrichedOccurrenceAmounts(occ: EnrichedOccurrence[]): number {
+  return occ.reduce((s, o) => s + Math.max(0, Number(o.recurringBill.amount) || 0), 0);
+}
+
+export function sumBillAmounts(rows: Bill[]): number {
+  return rows.reduce((s, b) => s + Math.max(0, Number(b.amount) || 0), 0);
+}
+
+/**
+ * Estimated typical monthly outflow from active recurring templates
+ * (monthly = 1×, weekly ≈ 52/12×, biweekly ≈ 26/12×).
+ */
+export function estimateMonthlyRecurringTotal(recurring: RecurringBill[]): number {
+  return recurring.filter((b) => isTemplateActive(b)).reduce((s, b) => {
+    const amt = Math.max(0, Number(b.amount) || 0);
+    if (b.frequency === "monthly") return s + amt;
+    if (b.frequency === "weekly") return s + (amt * 52) / 12;
+    if (b.frequency === "biweekly") return s + (amt * 26) / 12;
+    return s;
+  }, 0);
 }
 
 /**

@@ -1,0 +1,259 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import DashboardShell from "@/components/dashboard/shell";
+import { supabase } from "@/lib/supabase";
+import { useUserPlan } from "@/hooks/use-user-plan";
+import UpgradeModal from "@/components/dashboard/upgrade-modal";
+import { PRO_MONTHLY_LABEL } from "@/lib/plan";
+import {
+  formatTrialRemainingShort,
+  getPlanAccountStatusLabel,
+  isTrialWindowActive,
+  shouldShowSubscribeCta,
+} from "@/lib/plan-access";
+import { UPGRADE_CONTEXT_HEADLINE } from "@/lib/upgrade-prompt";
+
+function displayNameFromUser(user: User | null): string {
+  const m = user?.user_metadata;
+  if (!m || typeof m !== "object") return "";
+  const meta = m as Record<string, unknown>;
+  return String(meta.full_name ?? meta.name ?? meta.display_name ?? "").trim();
+}
+
+function phoneFromUser(user: User | null): string {
+  if (!user) return "";
+  const m = user.user_metadata;
+  if (m && typeof m === "object" && "phone" in m && m.phone != null) {
+    return String(m.phone).trim();
+  }
+  return (user.phone ?? "").trim();
+}
+
+export default function UserSettingsPage() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [email, setEmail] = useState("");
+  const [emailInitial, setEmailInitial] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const { loading: planLoading, planAccess, refresh } = useUserPlan();
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
+
+  useEffect(() => {
+    async function load() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        window.location.href = "/login";
+        return;
+      }
+      setEmail(user.email ?? "");
+      setEmailInitial(user.email ?? "");
+      setFullName(displayNameFromUser(user));
+      setPhone(phoneFromUser(user));
+      setLoading(false);
+    }
+    load();
+  }, []);
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setMessage(null);
+    setSaving(true);
+
+    const nextEmail = email.trim();
+    const emailChanged = nextEmail !== emailInitial.trim();
+
+    try {
+      const updates: {
+        email?: string;
+        data: { full_name: string; phone: string };
+      } = {
+        data: {
+          full_name: fullName.trim(),
+          phone: phone.trim(),
+        },
+      };
+      if (emailChanged) {
+        if (!nextEmail) {
+          setMessage({ type: "err", text: "Email cannot be empty." });
+          setSaving(false);
+          return;
+        }
+        updates.email = nextEmail;
+      }
+
+      const { error } = await supabase.auth.updateUser(updates);
+
+      if (error) {
+        setMessage({ type: "err", text: error.message });
+        setSaving(false);
+        return;
+      }
+
+      setEmailInitial(nextEmail);
+      setMessage({
+        type: "ok",
+        text: emailChanged
+          ? "Saved. If you changed your email, check your inbox to confirm the new address (if your project requires it)."
+          : "Your profile has been updated.",
+      });
+    } catch (err) {
+      setMessage({
+        type: "err",
+        text: err instanceof Error ? err.message : "Something went wrong.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <DashboardShell
+        title="User settings"
+        subtitle="Loading your account…"
+        backHref="/dashboard"
+        backLabel="Back to Overview"
+        compact
+      >
+        <p className="text-sm text-slate-500 dark:text-slate-400">Loading…</p>
+      </DashboardShell>
+    );
+  }
+
+  return (
+    <DashboardShell
+      title="User settings"
+      subtitle="Update the name, email, and phone stored on your Balnced account."
+      backHref="/dashboard"
+      backLabel="Back to Overview"
+      compact
+    >
+      <div className="balnced-panel mx-auto max-w-lg rounded-2xl p-6 sm:p-8">
+        <div className="mb-6 rounded-xl border border-white/[0.08] bg-slate-900/35 p-4">
+          <p className="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-slate-500">
+            Plan
+          </p>
+          <p className="mt-1.5 text-sm font-medium text-slate-200">
+            {planLoading ? "…" : getPlanAccountStatusLabel(planAccess)}
+          </p>
+          {!planLoading && planAccess && isTrialWindowActive(planAccess) && planAccess.trialEndsAt ? (
+            <p className="mt-1 text-xs text-amber-200/90">
+              Trial ends{" "}
+              {new Date(planAccess.trialEndsAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+              {` · ${formatTrialRemainingShort(planAccess)}`}
+            </p>
+          ) : null}
+          <p className="mt-1 text-xs leading-relaxed text-slate-500">{UPGRADE_CONTEXT_HEADLINE}</p>
+          <p className="mt-1 text-xs leading-relaxed text-slate-500">
+            Pro adds Copilot, projections, goal simulations, and deeper insights — {PRO_MONTHLY_LABEL} at
+            launch.
+          </p>
+          <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
+            Subscription billing is powered by Stripe (checkout link from this screen once enabled).
+          </p>
+          {!planLoading && shouldShowSubscribeCta(planAccess) ? (
+            <button
+              type="button"
+              onClick={() => setUpgradeOpen(true)}
+              className="mt-3 text-sm font-medium text-violet-400 transition hover:text-violet-300"
+            >
+              {planAccess?.trialExpiredWithoutSubscription ? "Subscribe to Pro" : "View Pro features"}
+            </button>
+          ) : null}
+        </div>
+
+        <UpgradeModal
+          open={upgradeOpen}
+          onClose={() => setUpgradeOpen(false)}
+          planAccess={planAccess}
+          loadingPlan={planLoading}
+          onRefresh={refresh}
+        />
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div>
+            <label htmlFor="settings-full-name" className="mb-1 block text-sm font-medium text-slate-600 dark:text-slate-400">
+              Display name
+            </label>
+            <input
+              id="settings-full-name"
+              type="text"
+              autoComplete="name"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              className="balnced-input w-full"
+              placeholder="Your name"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="settings-email" className="mb-1 block text-sm font-medium text-slate-600 dark:text-slate-400">
+              Email
+            </label>
+            <input
+              id="settings-email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              className="balnced-input w-full"
+              placeholder="you@example.com"
+            />
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-500">
+              Changing your email may require a confirmation link, depending on your Supabase project settings.
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor="settings-phone" className="mb-1 block text-sm font-medium text-slate-600 dark:text-slate-400">
+              Phone number
+            </label>
+            <input
+              id="settings-phone"
+              type="tel"
+              autoComplete="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              className="balnced-input w-full"
+              placeholder="Optional"
+            />
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-500">
+              Stored in your account profile for your reference. Not used for SMS login unless you enable phone sign-in in Supabase.
+            </p>
+          </div>
+
+          {message ? (
+            <p
+              className={`rounded-xl px-3 py-2 text-sm ${
+                message.type === "ok"
+                  ? "bg-emerald-500/10 text-emerald-200"
+                  : "bg-rose-500/10 text-rose-200"
+              }`}
+              role={message.type === "err" ? "alert" : "status"}
+            >
+              {message.text}
+            </p>
+          ) : null}
+
+          <button
+            type="submit"
+            disabled={saving}
+            className="w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60"
+          >
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </form>
+      </div>
+    </DashboardShell>
+  );
+}

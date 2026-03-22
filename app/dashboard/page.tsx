@@ -17,28 +17,48 @@ import {
   getMonthlyPay,
   getNextPayday,
   getAnnualPay,
+  computeAvailableBalance,
   Budget,
   Bill,
   Expense,
   RecurringBill,
+  type Debt,
 } from "@/lib/dashboard-data";
+import ProFeatureTeaser from "@/components/dashboard/pro-feature-teaser";
+import { useUserPlan } from "@/hooks/use-user-plan";
+import { PRO_GATING_PLACEHOLDER_CLASS } from "@/lib/plan-ui";
 import { getSafeToSpendStatus } from "@/lib/financial-status";
 import { runProjection, type RetirementProfile } from "@/lib/retirement-projection";
 import { legacyToAccounts } from "@/lib/retirement-accounts";
 import { supabase } from "@/lib/supabase";
 import { getDashboardBillsBeforePayday } from "@/lib/recurring-bill-occurrences";
+import { computeFinancialHealthScore } from "@/lib/financial-health-score";
+import { computeOverviewNextActions } from "@/lib/overview-next-actions";
+import { computeMoneyFlowSnapshot } from "@/lib/overview-money-flow";
+import { computePaydayBalanceProjection } from "@/lib/overview-payday-projection";
+import { computeOverviewAlerts } from "@/lib/overview-alerts";
+import { computeOverviewPeriodSummary } from "@/lib/overview-period-summary";
 import {
+  OverviewFinancialHealthScore,
+  OverviewFinancialSummaryRow,
   OverviewGlassStat,
   OverviewRetirementHero,
   OverviewSafeToSpendHero,
   OverviewWhatToDoNext,
   getInsightAccent,
 } from "@/components/dashboard/overview-premium";
+import OverviewAlerts from "@/components/dashboard/overview-alerts";
+import OverviewMoneyFlow from "@/components/dashboard/overview-money-flow";
+import OverviewPaydayProjection from "@/components/dashboard/overview-payday-projection";
 import { MotionLink } from "@/components/motion/motion-link";
 import { EASE_OUT, fadeUpItem, staggerContainer } from "@/components/motion/overview-variants";
+import CopilotChat from "@/components/dashboard/copilot-chat";
+import DailyEngagementCard from "@/components/dashboard/daily-engagement-card";
+import DebtSnapshotCard from "@/components/dashboard/debt-snapshot-card";
+import type { CopilotOverviewContext } from "@/lib/copilot-types";
 
 const panelClassName =
-  "rounded-3xl border border-white/[0.07] bg-slate-950/40 p-5 shadow-[0_8px_32px_-16px_rgba(0,0,0,0.55)] sm:p-6 md:p-7";
+  "rounded-3xl border border-white/[0.07] bg-slate-950/40 p-5 shadow-[0_8px_32px_-16px_rgba(0,0,0,0.55)] transition-[box-shadow,border-color] duration-300 ease-out sm:p-6 md:p-7";
 
 function DashboardOverviewContent() {
   const reduce = useReducedMotion();
@@ -48,15 +68,14 @@ function DashboardOverviewContent() {
   const [bills, setBills] = useState<Bill[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [recurringBills, setRecurringBills] = useState<RecurringBill[]>([]);
+  const [debts, setDebts] = useState<Debt[]>([]);
   const [loading, setLoading] = useState(true);
-  const [guidance, setGuidance] = useState<{
-    status: string;
-    actions: string[];
-    nextEvent: string;
-    optionalOptimization: string | null;
-  } | null>(null);
   const [estimatedRetirement, setEstimatedRetirement] = useState<number | null>(null);
+  const { hasProAccess, loading: planLoading } = useUserPlan();
+  const proReady = !planLoading;
+  const isPro = proReady && hasProAccess;
 
+  /** Bills, budget, expenses — not the live source for Pro/trial UI (see `useUserPlan()` above). */
   const loadData = useCallback(async () => {
     setLoading(true);
     const data = await loadDashboardData();
@@ -78,6 +97,7 @@ function DashboardOverviewContent() {
     setBills(data.bills);
     setExpenses(data.expenses);
     setRecurringBills(data.recurringBills);
+    setDebts(data.debts ?? []);
     setLoading(false);
   }, []);
 
@@ -164,9 +184,7 @@ function DashboardOverviewContent() {
     0
   );
 
-  const currentBalance = budget
-    ? Number(budget.balance) - expensesTotal
-    : 0;
+  const currentBalance = computeAvailableBalance(budget, expenses);
 
   const expectedPaycheck = getExpectedPaycheck(budget);
   const monthlyPay = getMonthlyPay(budget);
@@ -225,79 +243,223 @@ function DashboardOverviewContent() {
       }, {} as Record<string, number>);
   }, [expenses]);
 
-  useEffect(() => {
-    async function fetchGuidance() {
-      if (!budget) return;
-
-      const goalsData = userId ? loadUserGoals(userId) : null;
-      const investPercent = goalsData?.invest_percent ?? 0;
-      const monthlyRetirement =
-        monthlyPay > 0 && investPercent > 0
-          ? Math.round((monthlyPay * investPercent) / 100)
-          : 0;
-
-      try {
-        const response = await fetch("/api/insights", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            balance: currentBalance,
-            safeToSpend,
-            billsTotal,
-            expensesTotal,
-            dailySpendingLimit,
-            nextPayday: nextPayday ?? budget?.next_payday ?? "",
-            daysUntilPayday,
-            expectedPaycheck,
-            upcomingBills: upcomingBills.map((b) => ({
-              name: b.name,
-              amount: Number(b.amount),
-              due_date: b.due_date,
-            })),
-            investPercent: goalsData?.invest_percent,
-            savePercent: goalsData?.save_percent,
-            monthlyRetirementContribution: monthlyRetirement,
-          }),
-        });
-
-        const data = await response.json();
-        setGuidance({
-          status: data.status ?? "Unable to load guidance.",
-          actions: Array.isArray(data.actions) ? data.actions : [],
-          nextEvent: data.nextEvent ?? "",
-          optionalOptimization: data.optionalOptimization ?? null,
-        });
-      } catch {
-        setGuidance({
-          status: "Could not load guidance.",
-          actions: ["Try again in a moment."],
-          nextEvent: "",
-          optionalOptimization: null,
-        });
-      }
-    }
-
-    fetchGuidance();
-  }, [
-    userId,
-    budget,
-    currentBalance,
-    nextPayday,
-    safeToSpend,
-    billsTotal,
-    expensesTotal,
-    dailySpendingLimit,
-    daysUntilPayday,
-    expectedPaycheck,
-    monthlyPay,
-    upcomingBills,
-  ]);
+  const nextActions = useMemo(
+    () =>
+      computeOverviewNextActions({
+        safeToSpend,
+        monthlyPay,
+        billsCommitted: billsTotal,
+        savingsRatePercent: savePct + investPct,
+        financialStatus: safeToSpendStatus.status,
+        daysUntilPayday,
+      }),
+    [
+      safeToSpend,
+      monthlyPay,
+      billsTotal,
+      savePct,
+      investPct,
+      safeToSpendStatus.status,
+      daysUntilPayday,
+    ]
+  );
 
   const recentCategories = Object.entries(currentMonthCategoryTotals)
     .sort((a, b) => Number(b[1]) - Number(a[1]))
     .slice(0, 3);
 
   const insightAccent = getInsightAccent(safeToSpendStatus.status);
+
+  const periodSummary = useMemo(
+    () =>
+      computeOverviewPeriodSummary(
+        budget,
+        bills,
+        recurringBills,
+        expenses,
+        userId,
+        new Date()
+      ),
+    [budget, bills, recurringBills, expenses, userId]
+  );
+
+  const financialHealth = useMemo(
+    () =>
+      computeFinancialHealthScore({
+        safeToSpend,
+        monthlyPay,
+        billsCommitted: billsTotal,
+        savePercent: savePct,
+        investPercent: investPct,
+        estimatedRetirement,
+        financialStatus: safeToSpendStatus.status,
+      }),
+    [
+      safeToSpend,
+      monthlyPay,
+      billsTotal,
+      savePct,
+      investPct,
+      estimatedRetirement,
+      safeToSpendStatus.status,
+    ]
+  );
+
+  const moneyFlow = useMemo(
+    () =>
+      computeMoneyFlowSnapshot(
+        budget,
+        recurringBills,
+        expenses,
+        userId,
+        expensesTotal,
+        new Date()
+      ),
+    [budget, recurringBills, expenses, userId, expensesTotal]
+  );
+
+  const paydayProjection = useMemo(
+    () =>
+      computePaydayBalanceProjection(
+        currentBalance,
+        expenses,
+        daysUntilPayday,
+        new Date()
+      ),
+    [currentBalance, expenses, daysUntilPayday]
+  );
+
+  const overviewAlerts = useMemo(
+    () =>
+      computeOverviewAlerts({
+        recurringBills,
+        bills,
+        safeToSpend,
+        financialStatus: safeToSpendStatus.status,
+        savePercent: savePct,
+        investPercent: investPct,
+        monthlyPay,
+        now: new Date(),
+      }),
+    [
+      recurringBills,
+      bills,
+      safeToSpend,
+      safeToSpendStatus.status,
+      savePct,
+      investPct,
+      monthlyPay,
+    ]
+  );
+
+  const copilotContext = useMemo((): CopilotOverviewContext => {
+    const topCategoriesThisMonth = Object.entries(currentMonthCategoryTotals)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 5)
+      .map(([category, amount]) => ({ category, amount: Number(amount) }));
+
+    const upcomingBeforePayday = upcomingBills.slice(0, 10).map((b) => ({
+      name: String(b.name).slice(0, 80),
+      amount: Number(b.amount),
+      dueDate: formatDate(b.due_date),
+    }));
+
+    const savingsGoals =
+      goalsData?.savings_goals?.slice(0, 8).map((g) => ({
+        name: String(g.name).slice(0, 80),
+        targetAmount: Number(g.amount) || 0,
+        priority: Math.floor(Number(g.priority)) || 1,
+      })) ?? [];
+
+    return {
+      asOf: new Date().toISOString(),
+      cashAndPayPeriod: {
+        nextPaydayLabel: nextPayday ? formatDate(nextPayday) : null,
+        daysUntilPayday,
+        walletBalanceAfterLoggedExpenses: currentBalance,
+        safeToSpend,
+        dailySpendingLimitUntilPayday: dailySpendingLimit,
+        safeToSpendStatus: safeToSpendStatus.status,
+      },
+      income: {
+        expectedPaycheckPerPayPeriod: expectedPaycheck,
+        monthlyTakeHome: monthlyPay,
+        annualTakeHomeEstimate: getAnnualPay(budget),
+      },
+      bills: {
+        totalCommittedBeforePayday: billsTotal,
+        upcomingBeforePayday,
+      },
+      expenses: {
+        spendingThisMonth: moneyFlow?.spendingThisMonth ?? 0,
+        topCategoriesThisMonth: topCategoriesThisMonth,
+      },
+      monthlyMoneyFlow: moneyFlow
+        ? {
+            incomeMonthly: moneyFlow.incomeMonthly,
+            recurringBillsMonthlyEstimate: moneyFlow.billsMonthly,
+            savingsAndInvestAllocatedMonthly: moneyFlow.savingsAllocatedMonthly,
+            spendingThisMonth: moneyFlow.spendingThisMonth,
+            walletBalance: moneyFlow.remainingBalance,
+          }
+        : null,
+      payPeriodSnapshot: periodSummary
+        ? {
+            incomeThisPeriod: periodSummary.incomeThisPeriod,
+            billsCommitted: periodSummary.billsCommitted,
+            savingsAllocated: periodSummary.savingsAllocated,
+            remainingBalance: periodSummary.remainingBalance,
+            safeToSpendThisPeriod: periodSummary.safeToSpend,
+            summarySentence: periodSummary.summarySentence,
+            sentenceVariant: periodSummary.sentenceVariant,
+          }
+        : null,
+      goals: {
+        savePercent: savePct,
+        investPercent: investPct,
+        monthlyToSavingsAndInvest: monthlySavings + monthlyInvesting,
+        savingsGoals,
+        targetRetirementAge:
+          goalsData?.retirement_age != null ? Number(goalsData.retirement_age) : null,
+      },
+      retirement: {
+        projectedPortfolioAtRetirementUsd: estimatedRetirement,
+      },
+      health: {
+        score: financialHealth.score,
+        label: financialHealth.statusLabel,
+      },
+      pace: {
+        projectedBalanceAtPayday: paydayProjection.projectedBalanceAtPayday,
+        dailySpendPaceThisMonth: paydayProjection.dailySpendPace,
+      },
+    };
+  }, [
+    currentMonthCategoryTotals,
+    upcomingBills,
+    goalsData,
+    nextPayday,
+    daysUntilPayday,
+    currentBalance,
+    safeToSpend,
+    dailySpendingLimit,
+    safeToSpendStatus.status,
+    expectedPaycheck,
+    monthlyPay,
+    budget,
+    billsTotal,
+    moneyFlow,
+    periodSummary,
+    savePct,
+    investPct,
+    monthlySavings,
+    monthlyInvesting,
+    estimatedRetirement,
+    financialHealth.score,
+    financialHealth.statusLabel,
+    paydayProjection.projectedBalanceAtPayday,
+    paydayProjection.dailySpendPace,
+  ]);
 
   if (loading) {
     return (
@@ -327,19 +489,22 @@ function DashboardOverviewContent() {
   return (
     <DashboardShell
       title="Overview"
-      subtitle="One calm view of this pay period."
+      subtitle="Your command center for this pay period."
     >
+      <>
       <motion.div
         variants={staggerContainer(reduce, 0.055, 0.05)}
         initial="hidden"
         animate="visible"
-        className="flex flex-col gap-8 pb-8"
+        className="flex flex-col gap-6 pb-10 sm:gap-8 lg:gap-10"
       >
+        {/* Hero */}
         <motion.div
           variants={staggerContainer(reduce, 0.06, 0)}
           initial="hidden"
           animate="visible"
           className="grid gap-6 lg:grid-cols-12 lg:items-stretch"
+          aria-label="Hero"
         >
           <motion.div variants={fadeUpItem(reduce)} className="lg:col-span-7">
             <OverviewSafeToSpendHero
@@ -366,73 +531,148 @@ function DashboardOverviewContent() {
           </motion.div>
         </motion.div>
 
-        <motion.div
-          variants={staggerContainer(reduce, 0.05, 0)}
-          initial="hidden"
-          animate="visible"
-          className="grid gap-4 sm:grid-cols-3 sm:gap-6"
-        >
-          <OverviewGlassStat
-            label="Current balance"
-            value={formatMoney(currentBalance)}
-            subtext="After expenses you’ve logged."
-          />
-          <OverviewGlassStat
-            label="Next payday"
-            value={nextPayday ? formatDate(nextPayday) : "—"}
-            subtext={
-              <>
-                {daysUntilPayday} day{daysUntilPayday === 1 ? "" : "s"} out
-                {expectedPaycheck > 0 && <> · {formatMoney(expectedPaycheck)} expected</>}
-              </>
-            }
-          />
-          <OverviewGlassStat
-            label="Daily limit"
-            value={formatMoney(dailySpendingLimit)}
-            subtext="A steady pace until payday."
-          />
-        </motion.div>
+        {userId ? (
+          <motion.div variants={fadeUpItem(reduce)} className="w-full">
+            <DailyEngagementCard userId={userId} expenses={expenses} />
+          </motion.div>
+        ) : null}
 
-        <motion.div variants={fadeUpItem(reduce)}>
-          <OverviewWhatToDoNext
-            guidance={guidance}
-            financialStatus={safeToSpendStatus.status}
-            accent={insightAccent}
+        {/* Summary */}
+        <section className="space-y-4 sm:space-y-5" aria-label="Summary">
+          <motion.div variants={fadeUpItem(reduce)} className="w-full">
+            <OverviewFinancialHealthScore result={financialHealth} />
+          </motion.div>
+
+          {periodSummary ? (
+            <motion.div variants={fadeUpItem(reduce)} className="w-full">
+              <OverviewFinancialSummaryRow summary={periodSummary} />
+            </motion.div>
+          ) : null}
+
+          <motion.div
+            variants={staggerContainer(reduce, 0.05, 0)}
+            initial="hidden"
+            animate="visible"
+            className="grid gap-3 sm:grid-cols-3 sm:gap-4 lg:gap-5"
           >
-            <MotionLink
-              href="/insights"
-              whileHover={
-                reduce
-                  ? undefined
-                  : { scale: 1.02, transition: { duration: 0.15, ease: EASE_OUT } }
+            <OverviewGlassStat
+              label="Current balance"
+              value={formatMoney(currentBalance)}
+              subtext="After expenses you’ve logged."
+            />
+            <OverviewGlassStat
+              label="Next payday"
+              value={nextPayday ? formatDate(nextPayday) : "—"}
+              subtext={
+                <>
+                  {daysUntilPayday} day{daysUntilPayday === 1 ? "" : "s"} out
+                  {expectedPaycheck > 0 && <> · {formatMoney(expectedPaycheck)} expected</>}
+                </>
               }
-              whileTap={reduce ? undefined : { scale: 0.98 }}
-              className="inline-flex min-h-[2.75rem] items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors duration-150 ease-out hover:bg-emerald-500 motion-reduce:transition-none"
-            >
-              Insights
-            </MotionLink>
-            <MotionLink
-              href="/projection"
-              whileHover={
-                reduce
-                  ? undefined
-                  : { scale: 1.02, transition: { duration: 0.15, ease: EASE_OUT } }
-              }
-              whileTap={reduce ? undefined : { scale: 0.98 }}
-              className="inline-flex min-h-[2.75rem] items-center justify-center rounded-xl border border-white/10 px-5 py-2.5 text-sm font-medium text-slate-200 transition-colors duration-150 ease-out hover:border-white/20 hover:bg-white/[0.04] motion-reduce:transition-none"
-            >
-              Projection
-            </MotionLink>
-          </OverviewWhatToDoNext>
-        </motion.div>
+            />
+            <OverviewGlassStat
+              label="Daily limit"
+              value={formatMoney(dailySpendingLimit)}
+              subtext="A steady pace until payday."
+            />
+          </motion.div>
 
-        <motion.div
-          variants={staggerContainer(reduce, 0.07, 0)}
-          initial="hidden"
-          animate="visible"
-          className="grid gap-6 xl:grid-cols-2"
-        >
+          <motion.div variants={fadeUpItem(reduce)} className="w-full">
+            <DebtSnapshotCard debts={debts} />
+          </motion.div>
+        </section>
+
+        {/* Actions */}
+        <section className="space-y-4 sm:space-y-5" aria-label="Actions">
+          {overviewAlerts.length > 0 ? (
+            <motion.div variants={fadeUpItem(reduce)} className="w-full">
+              <OverviewAlerts alerts={overviewAlerts} />
+            </motion.div>
+          ) : null}
+
+          <motion.div variants={fadeUpItem(reduce)}>
+            <OverviewWhatToDoNext
+              actions={nextActions}
+              financialStatus={safeToSpendStatus.status}
+              accent={insightAccent}
+            >
+              <MotionLink
+                href="/insights"
+                whileHover={
+                  reduce
+                    ? undefined
+                    : { scale: 1.02, transition: { duration: 0.15, ease: EASE_OUT } }
+                }
+                whileTap={reduce ? undefined : { scale: 0.98 }}
+                className="inline-flex min-h-[2.75rem] items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors duration-150 ease-out hover:bg-emerald-500 motion-reduce:transition-none"
+              >
+                Insights
+              </MotionLink>
+              <MotionLink
+                href="/projection"
+                whileHover={
+                  reduce
+                    ? undefined
+                    : { scale: 1.02, transition: { duration: 0.15, ease: EASE_OUT } }
+                }
+                whileTap={reduce ? undefined : { scale: 0.98 }}
+                className="inline-flex min-h-[2.75rem] items-center justify-center rounded-xl border border-white/10 px-5 py-2.5 text-sm font-medium text-slate-200 transition-colors duration-150 ease-out hover:border-white/20 hover:bg-white/[0.04] motion-reduce:transition-none"
+              >
+                Projection
+              </MotionLink>
+            </OverviewWhatToDoNext>
+          </motion.div>
+        </section>
+
+        {/* Details — Pro widgets use useUserPlan(); loadDashboardData is only for numbers above */}
+        <section className="space-y-4 sm:space-y-5" aria-label="Details">
+          {moneyFlow && proReady && isPro ? (
+            <motion.div variants={fadeUpItem(reduce)} className="w-full">
+              <OverviewMoneyFlow flow={moneyFlow} />
+            </motion.div>
+          ) : null}
+
+          {moneyFlow && proReady && !isPro ? (
+            <motion.div variants={fadeUpItem(reduce)} className="w-full">
+              <ProFeatureTeaser title="Money flow breakdown" surface="overview_money_flow" />
+            </motion.div>
+          ) : null}
+
+          {moneyFlow && !proReady ? (
+            <motion.div
+              variants={fadeUpItem(reduce)}
+              className={`w-full ${PRO_GATING_PLACEHOLDER_CLASS}`}
+              aria-hidden
+            />
+          ) : null}
+
+          {proReady ? (
+            isPro ? (
+              <motion.div variants={fadeUpItem(reduce)} className="w-full">
+                <OverviewPaydayProjection
+                  projection={paydayProjection}
+                  paydayLabel={nextPayday ? formatDate(nextPayday) : "payday"}
+                />
+              </motion.div>
+            ) : (
+              <motion.div variants={fadeUpItem(reduce)} className="w-full">
+                <ProFeatureTeaser title="Payday balance projection" surface="overview_payday" />
+              </motion.div>
+            )
+          ) : (
+            <motion.div
+              variants={fadeUpItem(reduce)}
+              className={`w-full ${PRO_GATING_PLACEHOLDER_CLASS}`}
+              aria-hidden
+            />
+          )}
+
+          <motion.div
+            variants={staggerContainer(reduce, 0.07, 0)}
+            initial="hidden"
+            animate="visible"
+            className="grid gap-6 xl:grid-cols-2"
+          >
           <motion.div
             variants={fadeUpItem(reduce)}
             whileHover={
@@ -548,7 +788,7 @@ function DashboardOverviewContent() {
                 <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-slate-500">
                   Bills committed
                 </p>
-                <p className="mt-2 text-lg font-semibold tabular-nums tracking-tight text-slate-50 sm:text-xl">
+                <p className="mt-2 text-xl font-bold tabular-nums tracking-tight text-slate-50 sm:text-2xl sm:leading-none">
                   {formatMoney(billsTotal)}
                 </p>
               </motion.div>
@@ -556,7 +796,7 @@ function DashboardOverviewContent() {
                 <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-slate-500">
                   Logged expenses
                 </p>
-                <p className="mt-2 text-lg font-semibold tabular-nums tracking-tight text-slate-50 sm:text-xl">
+                <p className="mt-2 text-xl font-bold tabular-nums tracking-tight text-slate-50 sm:text-2xl sm:leading-none">
                   {formatMoney(expensesTotal)}
                 </p>
               </motion.div>
@@ -618,7 +858,10 @@ function DashboardOverviewContent() {
             </div>
           </motion.div>
         </motion.div>
+        </section>
       </motion.div>
+      <CopilotChat context={copilotContext} isPro={isPro} />
+      </>
     </DashboardShell>
   );
 }

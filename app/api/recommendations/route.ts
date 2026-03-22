@@ -1,9 +1,46 @@
 import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { formatAccountLabel } from "@/lib/retirement-accounts";
+import { getProAccessForUser, proPlanRequiredResponse } from "@/lib/plan-server";
 
 export async function POST(req: Request) {
   try {
+    const authHeader = req.headers.get("authorization");
+    const token =
+      authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+
+    if (!token) {
+      return NextResponse.json({ error: "missing_auth", recommendation: null }, { status: 401 });
+    }
+
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return NextResponse.json(
+        { error: "server_config", recommendation: null },
+        { status: 503 }
+      );
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    });
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return NextResponse.json({ error: "invalid_session", recommendation: null }, { status: 401 });
+    }
+
+    const hasPro = await getProAccessForUser(supabase, user.id);
+    if (!hasPro) {
+      return proPlanRequiredResponse();
+    }
+
     const apiKey = process.env.OPENAI_API_KEY;
 
     if (!apiKey) {

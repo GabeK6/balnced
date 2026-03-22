@@ -2,20 +2,45 @@
 
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
+import BalncedLogo from "@/components/brand/balnced-logo";
+import { AuthBrandedPanel } from "@/components/auth/auth-branded-panel";
+import { AuthFormSurface } from "@/components/auth/auth-form-surface";
+import { AuthPageShell } from "@/components/auth/auth-page-shell";
+import { AUTH_PRIMARY_BUTTON_CLASS } from "@/components/auth/auth-styles";
+import { AUTH_FEATURE_BULLETS, AUTH_SIGNUP_COPY } from "@/lib/auth-marketing";
+import { TRUST_DISCLAIMER } from "@/lib/trust-copy";
 
 export default function SignupPage() {
+  const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState("");
 
   async function handleSignup(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    if (password !== confirmPassword) {
+      setMessage("Passwords do not match.");
+      return;
+    }
+
+    if (password.length < 6) {
+      setMessage("Password must be at least 6 characters.");
+      return;
+    }
+
     setMessage("Creating account...");
 
     try {
+      const trimmedName = displayName.trim();
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
+        options:
+          trimmedName.length > 0
+            ? { data: { full_name: trimmedName } }
+            : undefined,
       });
 
       if (error) {
@@ -37,64 +62,142 @@ export default function SignupPage() {
     }
   }
 
-  return (
-    <main className="min-h-screen bg-slate-950 px-4 py-12 text-slate-100 sm:py-16">
-      <div className="balnced-panel mx-auto max-w-md rounded-3xl p-6 sm:p-8">
-        <a href="/" className="text-lg font-bold text-slate-50 sm:text-xl">
-          Balnced
-        </a>
-        <h1 className="mt-5 text-2xl font-bold tracking-tight text-slate-50 sm:text-[1.65rem]">
+  const formPanel = (
+    <div className="balnced-page-enter mx-auto w-full max-w-md">
+      <AuthFormSurface>
+        <BalncedLogo size="md" href="/" />
+        <h1 className="mt-6 text-2xl font-bold tracking-tight text-slate-50 sm:text-[1.75rem]">
           Create your account
         </h1>
-        <p className="mt-2 text-sm leading-relaxed text-slate-400">Start using Balnced.</p>
+        <p className="balnced-text-muted mt-2 text-[0.95rem] leading-relaxed">
+          Join Balnced and see your money in one place.
+        </p>
 
-        <form onSubmit={handleSignup} className="mt-7 space-y-4">
+        <form onSubmit={handleSignup} className="mt-8 space-y-5">
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-400">Email</label>
+            <label
+              htmlFor="signup-name"
+              className="mb-1.5 block text-sm font-medium text-slate-400"
+            >
+              Name <span className="font-normal text-slate-500">(optional)</span>
+            </label>
             <input
+              id="signup-name"
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              autoComplete="name"
+              className="balnced-input"
+              placeholder="Alex"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="signup-email"
+              className="mb-1.5 block text-sm font-medium text-slate-400"
+            >
+              Email
+            </label>
+            <input
+              id="signup-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
+              autoComplete="email"
               className="balnced-input"
               placeholder="you@example.com"
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-400">Password</label>
+            <label
+              htmlFor="signup-password"
+              className="mb-1.5 block text-sm font-medium text-slate-400"
+            >
+              Password
+            </label>
             <input
+              id="signup-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              autoComplete="new-password"
               className="balnced-input"
               placeholder="Create a password"
+              minLength={6}
             />
           </div>
 
-          <button
-            type="submit"
-            className="min-h-[2.75rem] w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 sm:text-base"
-          >
+          <div>
+            <label
+              htmlFor="signup-confirm"
+              className="mb-1.5 block text-sm font-medium text-slate-400"
+            >
+              Confirm password
+            </label>
+            <input
+              id="signup-confirm"
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              autoComplete="new-password"
+              className="balnced-input"
+              placeholder="Re-enter password"
+              minLength={6}
+            />
+          </div>
+
+          <button type="submit" className={AUTH_PRIMARY_BUTTON_CLASS}>
             Sign up
           </button>
         </form>
 
-        {message ? <p className="mt-4 text-sm text-slate-400">{message}</p> : null}
+        {message ? (
+          <p
+            className="mt-5 rounded-xl border border-white/[0.08] bg-slate-900/50 px-3 py-2.5 text-sm text-slate-300"
+            role="status"
+          >
+            {message}
+          </p>
+        ) : null}
 
-        <p className="mt-6 text-center text-sm text-slate-500">
-          Already have an account?{" "}
-          <a href="/login" className="font-medium text-emerald-400 hover:text-emerald-300">
-            Log in
-          </a>
-        </p>
-        <p className="mt-2 text-center text-sm text-slate-500">
-          <a href="/" className="font-medium text-emerald-400 hover:text-emerald-300">
+        <div className="mt-8 flex flex-col gap-3 border-t border-white/[0.08] pt-8 text-center text-sm sm:flex-row sm:items-center sm:justify-center sm:gap-6 sm:text-left">
+          <a
+            href="/"
+            className="font-medium text-emerald-400 transition hover:text-emerald-300"
+          >
             Back to home
           </a>
+          <span className="hidden text-slate-600 sm:inline" aria-hidden>
+            ·
+          </span>
+          <a
+            href="/login"
+            className="font-medium text-slate-300 transition hover:text-white"
+          >
+            Log in
+          </a>
+        </div>
+        <p className="mt-6 text-center text-[0.65rem] leading-relaxed text-slate-600">
+          {TRUST_DISCLAIMER}
         </p>
-      </div>
-    </main>
+      </AuthFormSurface>
+    </div>
   );
+
+  const brandedPanel = (
+    <AuthBrandedPanel
+      headline={AUTH_SIGNUP_COPY.headline}
+      supporting={AUTH_SIGNUP_COPY.supporting}
+      features={AUTH_FEATURE_BULLETS}
+      mobileHeadline={AUTH_SIGNUP_COPY.mobileHeadline}
+      mobileSupporting={AUTH_SIGNUP_COPY.mobileSupporting}
+    />
+  );
+
+  return <AuthPageShell formPanel={formPanel} brandedPanel={brandedPanel} />;
 }

@@ -150,6 +150,35 @@ export function plannedRetirementContributionsMonthly(args: {
 }
 
 /**
+ * Employee-plan dollars only (deferral % + fixed annual); excludes employer match.
+ * Used for the contribution simulator slider baseline.
+ */
+export function employeeRetirementContributionsAnnual(
+  accounts: RetirementAccounts | undefined | null,
+  annualSalary: number
+): number {
+  if (!accounts) return 0;
+  const salary = Math.max(0, n(annualSalary));
+  let total = 0;
+  for (const [type, raw] of Object.entries(accounts)) {
+    if (type === "pension") continue;
+    const inv = raw as InvestedAccountConfig;
+    const pct = Math.max(0, Math.min(100, n(inv.contribution_percent_of_salary)));
+    total += (salary * pct) / 100;
+    total += Math.max(0, n(inv.annual_contribution));
+  }
+  return total;
+}
+
+/** Monthly average of {@link employeeRetirementContributionsAnnual}. */
+export function employeeRetirementContributionsMonthly(args: {
+  accounts?: RetirementAccounts | null;
+  annualSalary?: number;
+}): number {
+  return employeeRetirementContributionsAnnual(args.accounts, n(args.annualSalary)) / 12;
+}
+
+/**
  * Convert legacy retirement profile columns (has_roth_ira/has_401k...) into the new accounts object.
  * This keeps existing saved users working after we migrate schema.
  */

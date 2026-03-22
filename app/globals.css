@@ -3,11 +3,20 @@
 :root {
   --background: #020617;
   --foreground: #f1f5f9;
+  /* Semantic tokens — calm dark fintech + emerald accent */
+  --balnced-canvas: #020617;
+  --balnced-accent: #10b981;
+  --balnced-accent-soft: rgba(16, 185, 129, 0.18);
+  --balnced-muted: #94a3b8;
+  --balnced-border-subtle: rgba(255, 255, 255, 0.08);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-balnced-canvas: var(--balnced-canvas);
+  --color-balnced-accent: var(--balnced-accent);
+  --color-balnced-muted: var(--balnced-muted);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -20,6 +29,19 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Typography — page subtitles & section eyebrows (use with Tailwind for sizing) */
+.balnced-text-muted {
+  color: var(--balnced-muted);
+}
+
+.balnced-eyebrow {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(52 211 153 / 0.92);
 }
 
 /**
@@ -89,5 +111,104 @@ body {
   .balnced-page-enter,
   .balnced-overview-enter {
     animation: none;
+  }
+}
+
+/* Retirement planner — quick feedback when projections change */
+@keyframes balnced-delta-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.balnced-delta-reveal {
+  animation: balnced-delta-reveal 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .balnced-delta-reveal {
+    animation: none;
+  }
+}
+
+/* Bills — mark paid feedback */
+@keyframes balnced-check-pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.balnced-check-pop {
+  animation: balnced-check-pop 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes balnced-bill-paid-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-0.4rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.balnced-bill-paid-enter {
+  animation: balnced-bill-paid-enter 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes balnced-paid-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+  }
+}
+
+.balnced-paid-flash {
+  animation: balnced-paid-flash 0.65s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .balnced-check-pop,
+  .balnced-bill-paid-enter,
+  .balnced-paid-flash {
+    animation: none;
+  }
+}
+
+/* Copilot — typing indicator dots */
+@keyframes copilot-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.88);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.copilot-dot {
+  animation: copilot-dot 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copilot-dot {
+    animation: none;
+    opacity: 0.65;
   }
 }

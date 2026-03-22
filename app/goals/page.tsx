@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState, useCallback, useMemo } from "react";
 import DashboardShell from "@/components/dashboard/shell";
 import {
@@ -8,16 +9,23 @@ import {
   saveUserGoals,
   getSavingsGoalTimelines,
   getMonthlyPay,
-  formatMoney,
   formatDateMonthYear,
   getEffectiveSavingsGoals,
   withSyncedLegacyBigPurchase,
   type UserGoals,
   type SavingsGoalItem,
+  type SavingsGoalDraftPatch,
   type Budget,
 } from "@/lib/dashboard-data";
-import { getGoalStatus } from "@/lib/financial-status";
-import StatusBadge from "@/components/dashboard/status-badge";
+import GoalsTimeline from "@/components/dashboard/goals-timeline";
+import GoalsSavingsSimulator from "@/components/dashboard/goals-savings-simulator";
+import SavingsFlowVisual from "@/components/dashboard/savings-flow-visual";
+import GoalsOverviewHero from "@/components/dashboard/goals-overview-hero";
+import GoalsSavingsSummaryCard from "@/components/dashboard/goals-savings-summary-card";
+import GoalsPlanInsights from "@/components/dashboard/goals-plan-insights";
+import ProFeatureTeaser from "@/components/dashboard/pro-feature-teaser";
+import { useUserPlan } from "@/hooks/use-user-plan";
+import { PRO_GATING_PLACEHOLDER_CLASS } from "@/lib/plan-ui";
 
 function newGoalDraft(priority: number): SavingsGoalItem {
   return {
@@ -34,6 +42,8 @@ function sortAndRenumberDrafts(drafts: SavingsGoalItem[]): SavingsGoalItem[] {
     .map((g, i) => ({ ...g, priority: i + 1 }));
 }
 
+const SECTION = "space-y-8 sm:space-y-10";
+
 export default function GoalsPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [budget, setBudget] = useState<Budget | null>(null);
@@ -49,6 +59,9 @@ export default function GoalsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState(false);
+  const { hasProAccess, loading: planLoading } = useUserPlan();
+  const proReady = !planLoading;
+  const isPro = proReady && hasProAccess;
 
   const loadData = useCallback(async () => {
     const data = await loadDashboardData();
@@ -74,7 +87,7 @@ export default function GoalsPage() {
     loadData();
   }, [loadData]);
 
-  const updateDraft = (id: string, patch: Partial<Pick<SavingsGoalItem, "name" | "amount">>) => {
+  const updateDraft = (id: string, patch: SavingsGoalDraftPatch) => {
     setGoalDrafts((prev) =>
       prev.map((g) => (g.id === id ? { ...g, ...patch } : g))
     );
@@ -173,23 +186,112 @@ export default function GoalsPage() {
     };
   }, [goals, goalDrafts, normalizedSavePct]);
 
-  const timelines = getSavingsGoalTimelines(budget, previewGoals, monthlySavingsFromSave);
-  const timelineById = useMemo(
-    () => new Map(timelines.map((t) => [t.id, t] as const)),
-    [timelines]
+  const previewGoalsKey = useMemo(() => {
+    const v = sortAndRenumberDrafts(goalDrafts).filter(
+      (g) => g.name.trim().length > 0 && Number(g.amount) > 0
+    );
+    return `${normalizedSavePct}:${v.map((g) => `${g.id}:${g.amount}:${g.priority}`).join("|")}`;
+  }, [goalDrafts, normalizedSavePct]);
+
+  const [savingsSimOverride, setSavingsSimOverride] = useState<number | null>(null);
+
+  useEffect(() => {
+    setSavingsSimOverride(null);
+  }, [previewGoalsKey, monthlySavingsFromSave]);
+
+  const savingsSimSliderMax = useMemo(() => {
+    const b = Math.max(0, monthlySavingsFromSave);
+    return Math.min(8000, Math.max(2000, Math.ceil((b + 150) / 50) * 50));
+  }, [monthlySavingsFromSave]);
+
+  const effectiveSavingsSimMonthly =
+    savingsSimOverride !== null ? savingsSimOverride : monthlySavingsFromSave;
+
+  const baselineTimelines = useMemo(
+    () => getSavingsGoalTimelines(budget, previewGoals, monthlySavingsFromSave),
+    [budget, previewGoals, monthlySavingsFromSave]
   );
+  const baselineTimelineById = useMemo(
+    () => new Map(baselineTimelines.map((t) => [t.id, t] as const)),
+    [baselineTimelines]
+  );
+
+  const simTimelines = useMemo(
+    () =>
+      getSavingsGoalTimelines(
+        budget,
+        previewGoals,
+        Math.max(0, effectiveSavingsSimMonthly)
+      ),
+    [budget, previewGoals, effectiveSavingsSimMonthly]
+  );
+  const timelineById = useMemo(
+    () => new Map(simTimelines.map((t) => [t.id, t] as const)),
+    [simTimelines]
+  );
+
   const sortedDrafts = sortAndRenumberDrafts(goalDrafts);
+
+  const firstFilledGoal = sortedDrafts.find(
+    (g) => g.name.trim().length > 0 && Number(g.amount) > 0
+  );
+  const firstSimT = firstFilledGoal ? timelineById.get(firstFilledGoal.id) : null;
+  const firstBaseT = firstFilledGoal ? baselineTimelineById.get(firstFilledGoal.id) : null;
+  const firstGoalSimDeltaMonths =
+    firstSimT && firstBaseT ? firstBaseT.months - firstSimT.months : null;
+
+  const aiStrategyPayload = useMemo(() => {
+    const valid = sortAndRenumberDrafts(goalDrafts).filter(
+      (g) => g.name.trim().length > 0 && Number(g.amount) > 0
+    );
+    if (!valid.length) return null;
+    return {
+      monthlyTakeHome: monthlyPay,
+      savePercent: normalizedSavePct,
+      monthlySavingsPlan: monthlySavingsFromSave,
+      goals: valid.map((g) => {
+        const t = baselineTimelineById.get(g.id);
+        return {
+          priority: g.priority,
+          name: g.name.trim(),
+          amount: Number(g.amount),
+          monthsToFund: t != null ? t.months : null,
+          targetMonthLabel: t ? formatDateMonthYear(t.targetDate) : null,
+        };
+      }),
+    };
+  }, [
+    goalDrafts,
+    normalizedSavePct,
+    monthlyPay,
+    monthlySavingsFromSave,
+    baselineTimelineById,
+  ]);
 
   if (loading) {
     return (
       <DashboardShell
-        title="Goals"
-        subtitle="Loading..."
-        backHref="/dashboard"
-        backLabel="Back to Overview"
+        title=""
+        subtitle=""
         compact
+        headerOverride={
+          <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm" aria-label="Breadcrumb">
+            <Link
+              href="/dashboard"
+              className="text-slate-500 transition-colors duration-150 hover:text-slate-300 motion-reduce:transition-none"
+            >
+              Overview
+            </Link>
+            <span className="text-slate-600" aria-hidden>
+              /
+            </span>
+            <span className="font-medium text-slate-200" aria-current="page">
+              Goals
+            </span>
+          </nav>
+        }
       >
-        <div className="balnced-panel rounded-3xl p-6 sm:p-7">
+        <div className="balnced-panel rounded-3xl p-6 sm:p-8">
           <p className="text-slate-400">Loading your goals...</p>
         </div>
       </DashboardShell>
@@ -198,185 +300,139 @@ export default function GoalsPage() {
 
   return (
     <DashboardShell
-      title="Goals"
-      subtitle="Multiple savings targets with priorities. #1 is funded first, then #2, and so on."
-      backHref="/dashboard"
-      backLabel="Back to Overview"
+      title=""
+      subtitle=""
       compact
+      headerOverride={
+        <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm" aria-label="Breadcrumb">
+          <Link
+            href="/dashboard"
+            className="text-slate-500 transition-colors duration-150 hover:text-slate-300 motion-reduce:transition-none"
+          >
+            Overview
+          </Link>
+          <span className="text-slate-600" aria-hidden>
+            /
+          </span>
+          <span className="font-medium text-slate-200" aria-current="page">
+            Goals
+          </span>
+        </nav>
+      }
     >
-      <form
-        onSubmit={handleSaveGoals}
-        className="grid h-full min-h-0 gap-5 lg:grid-cols-[minmax(0,340px)_1fr]"
-      >
-        <div className="flex min-h-0 flex-col gap-4">
-          <div className="balnced-panel rounded-2xl p-5 sm:p-6">
-            <h2 className="text-base font-semibold text-slate-100">Goals setup</h2>
-            <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Add goals here; edit names, amounts, and order on the right. Save when you’re done.
+      <form onSubmit={handleSaveGoals} className={SECTION}>
+        <div className="flex flex-col gap-2 border-b border-white/[0.06] pb-8 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-50 sm:text-3xl">
+              Goals
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-500">
+              A single plan for your savings waterfall — fund priorities in order, then tune what-if
+              scenarios and insights.
             </p>
-            <button
-              type="button"
-              onClick={addGoalRow}
-              className="mt-4 w-full rounded-xl border border-dashed border-slate-600 py-2.5 text-sm font-medium text-slate-400 transition hover:border-emerald-500/40 hover:text-emerald-400"
-            >
-              + Add another goal
-            </button>
           </div>
+        </div>
 
-          <div className="balnced-panel rounded-2xl p-5 sm:p-6">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Savings plan
-            </h3>
-            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Save % drives monthly funding and target dates on the right.
+        <GoalsOverviewHero
+          primaryGoal={firstFilledGoal ?? null}
+          timeline={firstSimT ?? null}
+          monthlySavings={effectiveSavingsSimMonthly}
+        />
+
+        <GoalsSavingsSummaryCard
+          savePercentInput={savePercentInput}
+          onSavePercentChange={setSavePercentInput}
+          monthlySavings={monthlySavingsFromSave}
+          savingsRatePercent={normalizedSavePct}
+        />
+
+        <section className="space-y-5" aria-label="Savings flow">
+          {savingsSimOverride !== null ? (
+            <p className="rounded-2xl border border-violet-500/30 bg-violet-950/35 px-5 py-3.5 text-center text-xs leading-relaxed text-violet-100/90 shadow-sm transition-opacity duration-300">
+              Previewing a different monthly rate—your{" "}
+              <span className="font-medium text-slate-200">save %</span> is unchanged until you click{" "}
+              <span className="font-medium text-slate-200">Save plan</span>.
             </p>
-            <div className="mt-3 grid gap-3 sm:grid-cols-1">
-              <div>
-                <label className="block text-xs font-medium text-slate-400">
-                  Save % of income
-                </label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0"
-                  max="100"
-                  placeholder="e.g. 15"
-                  value={savePercentInput}
-                  onChange={(e) => setSavePercentInput(e.target.value)}
-                  className="balnced-input mt-0.5"
-                />
+          ) : null}
+
+          {proReady ? (
+            isPro ? (
+              <GoalsSavingsSimulator
+                baselineMonthly={monthlySavingsFromSave}
+                sliderMin={0}
+                sliderMax={savingsSimSliderMax}
+                simulatedMonthly={Math.min(
+                  savingsSimSliderMax,
+                  Math.max(0, effectiveSavingsSimMonthly)
+                )}
+                onSimulatedChange={(v) => setSavingsSimOverride(v)}
+                onReset={() => setSavingsSimOverride(null)}
+                isDirty={savingsSimOverride !== null}
+                firstGoalName={firstFilledGoal?.name.trim() ?? null}
+                simTargetDate={firstSimT?.targetDate ?? null}
+                firstGoalMonthsDeltaVsBaseline={firstGoalSimDeltaMonths}
+              />
+            ) : (
+              <ProFeatureTeaser title="What-if savings simulator" surface="goals_sim" />
+            )
+          ) : (
+            <div className={PRO_GATING_PLACEHOLDER_CLASS} aria-hidden />
+          )}
+
+          <SavingsFlowVisual
+            monthlySavings={effectiveSavingsSimMonthly}
+            monthlyTakeHome={monthlyPay}
+            sortedDrafts={sortedDrafts}
+            timelineById={timelineById}
+          />
+        </section>
+
+        <section id="goals-plan" className="scroll-mt-6">
+          <div className="balnced-panel rounded-3xl p-6 sm:p-8">
+            <GoalsTimeline
+              sortedDrafts={sortedDrafts}
+              timelineById={timelineById}
+              monthlySavingsFromSave={effectiveSavingsSimMonthly}
+              monthlyTakeHome={monthlyPay}
+              updateDraft={updateDraft}
+              moveGoal={moveGoal}
+              removeGoalRow={removeGoalRow}
+              onAddGoal={addGoalRow}
+            />
+            <div className="mt-10 flex flex-col gap-4 border-t border-white/[0.06] pt-8 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="min-h-[2.75rem] rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-md shadow-emerald-900/20 transition hover:bg-emerald-500 hover:brightness-105 active:scale-[0.98] disabled:opacity-70 disabled:active:scale-100"
+                >
+                  {saving ? "Saving..." : "Save plan"}
+                </button>
+                {saveFeedback ? (
+                  <span
+                    className="rounded-full bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-200 ring-1 ring-emerald-500/25"
+                    role="status"
+                  >
+                    Saved
+                  </span>
+                ) : null}
               </div>
-              <div className="balnced-row rounded-xl p-4 text-sm text-slate-300">
-                <p className="text-xs text-slate-500">Monthly savings</p>
-                <p className="mt-2 text-base font-bold tabular-nums text-slate-100 sm:text-lg">
-                  {formatMoney(monthlySavingsFromSave)}
-                </p>
-                <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                  Waterfall: #1 is funded first, then #2, etc.
-                </p>
-              </div>
+              <p className="text-xs text-slate-600">
+                Updates apply to your overview and waterfall after you save.
+              </p>
             </div>
           </div>
+        </section>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="submit"
-              disabled={saving}
-              className="min-h-[2.75rem] flex-1 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-70"
-            >
-              {saving ? "Saving..." : "Save goals"}
-            </button>
-            {saveFeedback && (
-              <span className="shrink-0 rounded-full bg-emerald-100 px-4 py-2 text-sm font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
-                Saved!
-              </span>
-            )}
-          </div>
-        </div>
-
-        <div className="min-h-0 space-y-4 overflow-auto">
-          {sortedDrafts.map((g, idx) => {
-            const t = timelineById.get(g.id);
-            const filled = g.name.trim().length > 0 && Number(g.amount) > 0;
-            const goalStatus =
-              t && monthlySavingsFromSave > 0
-                ? getGoalStatus(true, t.amount, t.months, monthlySavingsFromSave)
-                : null;
-
-            return (
-              <div key={g.id} className="balnced-panel rounded-2xl p-5 sm:p-6">
-                <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.06] pb-3">
-                  <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
-                    Priority {g.priority}
-                  </span>
-                  <div className="ml-auto flex items-center gap-1">
-                    <button
-                      type="button"
-                      disabled={idx === 0}
-                      onClick={() => moveGoal(g.id, -1)}
-                      className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-300 disabled:opacity-30 hover:bg-white/[0.05]"
-                    >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      disabled={idx === sortedDrafts.length - 1}
-                      onClick={() => moveGoal(g.id, 1)}
-                      className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-300 disabled:opacity-30 hover:bg-white/[0.05]"
-                    >
-                      ↓
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => removeGoalRow(g.id)}
-                      className="rounded-lg bg-rose-500/15 px-2 py-1 text-xs text-rose-300 hover:bg-rose-500/25"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-4 rounded-xl border border-white/[0.06] bg-slate-900/30 p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                      Preview
-                    </p>
-                    {goalStatus ? (
-                      <StatusBadge status={goalStatus.status} label={goalStatus.label} />
-                    ) : null}
-                  </div>
-                  <input
-                    type="text"
-                    placeholder="Goal name"
-                    value={g.name}
-                    onChange={(e) => updateDraft(g.id, { name: e.target.value })}
-                    className="mt-2 w-full border-0 bg-transparent p-0 text-lg font-semibold text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-0"
-                  />
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className="text-sm text-slate-500 tabular-nums" aria-hidden>
-                      $
-                    </span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      placeholder="0"
-                      value={g.amount === 0 ? "" : String(g.amount)}
-                      onChange={(e) =>
-                        updateDraft(g.id, {
-                          amount: e.target.value === "" ? 0 : Number(e.target.value),
-                        })
-                      }
-                      className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm tabular-nums text-slate-400 placeholder:text-slate-600 focus:outline-none focus:ring-0"
-                    />
-                  </div>
-
-                  {t && monthlySavingsFromSave > 0 ? (
-                    <>
-                      <p className="mt-3 text-2xl font-bold text-emerald-600 dark:text-emerald-400">
-                        ~{formatDateMonthYear(t.targetDate)}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        {t.months} month{t.months !== 1 ? "s" : ""} of savings at your rate after
-                        earlier priorities.
-                      </p>
-                    </>
-                  ) : filled ? (
-                    <div className="mt-3">
-                      <p className="text-sm font-medium text-slate-400">Estimated target month</p>
-                      <p className="mt-0.5 text-base text-slate-500">
-                        Set <span className="text-slate-300">save %</span> on the left (&gt; 0) to see
-                        a month.
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="mt-3 text-sm text-slate-500">Add a name and amount to see details.</p>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <GoalsPlanInsights
+          firstGoalTimeline={firstSimT ?? null}
+          firstGoalName={firstFilledGoal?.name.trim() ?? null}
+          monthlySavings={effectiveSavingsSimMonthly}
+          savePercentEffective={normalizedSavePct}
+          aiPayload={aiStrategyPayload}
+          proReady={proReady}
+          isPro={isPro}
+        />
       </form>
     </DashboardShell>
   );

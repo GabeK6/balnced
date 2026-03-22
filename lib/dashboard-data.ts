@@ -1,4 +1,10 @@
 import { supabase } from "@/lib/supabase";
+import { billPaidFields } from "@/lib/bill-paid-fields";
+import type { PlanTier } from "@/lib/plan";
+import { fetchUserPlanAccess, type PlanAccessState } from "@/lib/plan-access";
+import { debtFromRow, type Debt } from "@/lib/debt-types";
+
+export type { Debt } from "@/lib/debt-types";
 
 export type Budget = {
   id?: string
@@ -49,13 +55,31 @@ export type RecurringBill = {
   created_at?: string;
 };
 
+/** Big-purchase template for guided goal setup (optional for backward compatibility). */
+export type SavingsGoalKind = "house" | "car" | "emergency_fund" | "custom";
+
 /** Savings target; lower `priority` number is funded first (1 = top priority). */
 export type SavingsGoalItem = {
   id: string;
   name: string;
   amount: number;
   priority: number;
+  /** Optional: House / Car / Emergency / Custom guided flow */
+  goal_kind?: SavingsGoalKind;
+  /** House: approximate purchase price (down payment = price × down_payment_percent). */
+  house_price?: number;
+  /** House: down payment percent (e.g. 20 = 20%). */
+  down_payment_percent?: number;
+  /** Car: hoped timeline in months (guidance vs. projected funding). */
+  car_target_months?: number;
+  /** Emergency fund: months of take-home to cover. */
+  emergency_months?: number;
 };
+
+/** Client-side edits to a savings goal draft (id/priority managed separately). */
+export type SavingsGoalDraftPatch = Partial<
+  Omit<SavingsGoalItem, "id" | "priority">
+>;
 
 export type UserGoals = {
   retirement_age: number;
@@ -114,6 +138,23 @@ export function getMonthlyPay(budget: Budget | null): number {
 /** Annual take-home pay derived from budget (paycheck × pay frequency). */
 export function getAnnualPay(budget: Budget | null): number {
   return getMonthlyPay(budget) * 12;
+}
+
+/**
+ * Cash left after logged expenses — same definition as Overview "Current balance".
+ * Starts from the user's bank balance (`budgets.balance`), not raw income alone.
+ */
+export function computeAvailableBalance(
+  budget: Budget | null,
+  expenses: Expense[]
+): number {
+  if (!budget) return 0;
+  const base = Number(budget.balance);
+  if (!Number.isFinite(base)) return 0;
+  const expensesTotal = expenses
+    .filter((e) => !e.archived)
+    .reduce((sum, e) => sum + Number(e.amount), 0);
+  return base - expensesTotal;
 }
 
 /** Get future payday dates from a starting date using pay frequency. */
@@ -199,6 +240,21 @@ export function formatDate(dateString: string) {
   return d.toLocaleDateString();
 }
 
+/** Full timestamp for expense rows (ISO from DB → local date + time). */
+export function formatExpenseDateTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const now = new Date();
+  const opts: Intl.DateTimeFormatOptions = {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
+  return d.toLocaleString("en-US", opts);
+}
+
 export function formatDateMonthYear(date: Date) {
   return date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
@@ -212,6 +268,19 @@ export function formatDateShort(dateString: string) {
   return `${month}/${day}/${year}`;
 }
 
+/** Bill cards: weekday + date (local), easy to scan. */
+export function formatBillDuePrimary(dateString: string) {
+  const d = parseDateOnlyLocal(dateString);
+  if (!d) return String(dateString);
+  return d.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/** USD, en-US, always 2 decimal places — use for all user-visible money in the app. */
 export function formatMoney(value: number) {
   const n = Number.isFinite(value) ? Number(value) : 0;
   return n.toLocaleString("en-US", {
@@ -525,10 +594,10 @@ export async function generateRecurringBills(
         name: recurringBill.name,
         amount: Number(recurringBill.amount),
         due_date: dueKey(dueDate) || dueDate,
-        is_paid: false,
         archived: false,
         recurring_bill_id: recurringBill.id,
         is_recurring: true,
+        ...billPaidFields(false),
       });
 
       existingKeys.add(key);
@@ -541,14 +610,34 @@ export async function generateRecurringBills(
   }
 }
 
+/**
+ * Loads budget, bills, expenses, and recurring data for dashboard surfaces.
+ * `plan` / `hasProAccess` / `planAccess` reflect the DB at fetch time; on the client, prefer
+ * `useUserPlan()` for Pro gating so UI stays in sync after focus refresh or trial changes.
+ */
 export async function loadDashboardData() {
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return { user: null, budget: null, bills: [], expenses: [], recurringBills: [] };
+    return {
+      user: null,
+      budget: null,
+      bills: [],
+      expenses: [],
+      recurringBills: [],
+      debts: [] as Debt[],
+      plan: "free" as PlanTier,
+      hasProAccess: false,
+      planAccess: null as PlanAccessState | null,
+      availableBalance: null as number | null,
+    };
   }
+
+  const planAccess = await fetchUserPlanAccess(supabase);
+  const plan: PlanTier = planAccess?.plan ?? "free";
+  const hasProAccess = planAccess?.hasProAccess ?? false;
 
   const { data: budgetData } = await supabase
     .from("budgets")
@@ -583,27 +672,91 @@ export async function loadDashboardData() {
     .eq("archived", false)
     .order("created_at", { ascending: false });
 
+  const { data: debtsData, error: debtsError } = await supabase
+    .from("debts")
+    .select("*")
+    .eq("user_id", user.id)
+    .order("balance", { ascending: false });
+
+  if (debtsError) {
+    console.error("[balnced] debts load failed:", debtsError.message);
+  }
+
+  const debts: Debt[] = (debtsData || []).map((row) =>
+    debtFromRow(row as Record<string, unknown>)
+  );
+
+  const expenses = (expensesData || []) as Expense[];
+  const budget = budgetData as Budget | null;
+
   return {
     user,
-    budget: budgetData as Budget | null,
+    budget,
     bills: (billsData || []) as Bill[],
-    expenses: (expensesData || []) as Expense[],
+    expenses,
     recurringBills,
+    debts,
+    plan,
+    hasProAccess,
+    planAccess,
+    availableBalance: computeAvailableBalance(budget, expenses),
   };
 }
 
 const GOALS_STORAGE_KEY = "balnced_user_goals";
+
+const VALID_GOAL_KINDS = new Set<string>([
+  "house",
+  "car",
+  "emergency_fund",
+  "custom",
+]);
+
+function parseStoredGoalKind(v: unknown): SavingsGoalKind | undefined {
+  if (typeof v !== "string" || !VALID_GOAL_KINDS.has(v)) return undefined;
+  return v as SavingsGoalKind;
+}
 
 function normalizeStoredSavingsGoals(raw: unknown): SavingsGoalItem[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const items = raw
     .map((x: unknown, i: number) => {
       const o = x as Record<string, unknown>;
+      const house_price = o?.house_price != null ? Number(o.house_price) : undefined;
+      const down_payment_percent =
+        o?.down_payment_percent != null ? Number(o.down_payment_percent) : undefined;
+      const car_target_months =
+        o?.car_target_months != null ? Number(o.car_target_months) : undefined;
+      const emergency_months =
+        o?.emergency_months != null ? Number(o.emergency_months) : undefined;
       return {
         id: typeof o?.id === "string" && o.id ? o.id : `goal-${i}`,
         name: String(o?.name ?? "").trim(),
         amount: Math.max(0, Number(o?.amount) || 0),
         priority: Number.isFinite(Number(o?.priority)) ? Number(o.priority) : i + 1,
+        goal_kind: parseStoredGoalKind(o?.goal_kind),
+        house_price:
+          house_price != null && Number.isFinite(house_price) && house_price >= 0
+            ? house_price
+            : undefined,
+        down_payment_percent:
+          down_payment_percent != null &&
+          Number.isFinite(down_payment_percent) &&
+          down_payment_percent >= 0
+            ? Math.min(100, down_payment_percent)
+            : undefined,
+        car_target_months:
+          car_target_months != null &&
+          Number.isFinite(car_target_months) &&
+          car_target_months >= 0
+            ? car_target_months
+            : undefined,
+        emergency_months:
+          emergency_months != null &&
+          Number.isFinite(emergency_months) &&
+          emergency_months > 0
+            ? emergency_months
+            : undefined,
       };
     })
     .filter((g) => g.name.length > 0 && g.amount > 0)

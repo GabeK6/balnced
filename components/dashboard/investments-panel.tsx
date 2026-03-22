@@ -15,6 +15,10 @@ import {
   type Budget,
   type RecurringBill,
 } from "@/lib/dashboard-data";
+import { TRUST_DISCLAIMER } from "@/lib/trust-copy";
+import { useUserPlan } from "@/hooks/use-user-plan";
+import { PRO_GATING_PLACEHOLDER_CLASS } from "@/lib/plan-ui";
+import ProFeatureTeaser from "@/components/dashboard/pro-feature-teaser";
 import {
   computeRecommendationPlan,
   type RecommendationPlan,
@@ -40,7 +44,11 @@ export default function InvestmentsPanel({
   const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [monthlyBills, setMonthlyBills] = useState(0);
   const [expensesTotal, setExpensesTotal] = useState(0);
+  const { hasProAccess, loading: planLoading } = useUserPlan();
+  const proReady = !planLoading;
+  const isPro = proReady && hasProAccess;
 
+  /** Loads profile + dashboard numbers; Pro gating uses `useUserPlan()` above. */
   const load = useCallback(async () => {
     const {
       data: { user },
@@ -121,7 +129,7 @@ export default function InvestmentsPanel({
     load();
   }, [load]);
 
-  const plan: RecommendationPlan | null = useMemo(() => {
+  const recommendationPlan: RecommendationPlan | null = useMemo(() => {
     if (!budget) return null;
     const fromPlanner =
       profile != null
@@ -140,9 +148,23 @@ export default function InvestmentsPanel({
   }, [budget, goals, monthlyBills, expensesTotal, profile]);
 
   const fetchRecommendations = useCallback(async () => {
-    if (!budget || !plan) return;
+    if (!budget || !recommendationPlan) return;
+    if (!isPro) {
+      setRecommendation(null);
+      return;
+    }
     setRecommendationLoading(true);
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setRecommendation(null);
+        setRecommendationLoading(false);
+        return;
+      }
+
       const localProjection = profile ? runProjection(profile) : null;
       const localRetirementStatus =
         localProjection && profile
@@ -150,21 +172,24 @@ export default function InvestmentsPanel({
           : null;
       const res = await fetch("/api/recommendations", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
-          monthlyPay: plan.monthlyIncome,
-          monthlyIncome: plan.monthlyIncome,
-          paycheckIncome: plan.paycheckIncome,
-          monthlyBills: plan.monthlyBills,
-          monthlyExpenses: plan.monthlyExpenses,
-          suggestedSaveMonthly: plan.suggestedSaveMonthly,
-          suggestedInvestMonthly: plan.suggestedInvestMonthly,
-          discretionaryMonthly: plan.discretionaryMonthly,
-          savePercent: plan.savePercent,
+          monthlyPay: recommendationPlan.monthlyIncome,
+          monthlyIncome: recommendationPlan.monthlyIncome,
+          paycheckIncome: recommendationPlan.paycheckIncome,
+          monthlyBills: recommendationPlan.monthlyBills,
+          monthlyExpenses: recommendationPlan.monthlyExpenses,
+          suggestedSaveMonthly: recommendationPlan.suggestedSaveMonthly,
+          suggestedInvestMonthly: recommendationPlan.suggestedInvestMonthly,
+          discretionaryMonthly: recommendationPlan.discretionaryMonthly,
+          savePercent: recommendationPlan.savePercent,
           investPercent:
-            plan.monthlyIncome > 0 && plan.suggestedInvestMonthly > 0
-              ? Math.min(100, (plan.suggestedInvestMonthly / plan.monthlyIncome) * 100)
-              : plan.investPercent,
+            recommendationPlan.monthlyIncome > 0 && recommendationPlan.suggestedInvestMonthly > 0
+              ? Math.min(100, (recommendationPlan.suggestedInvestMonthly / recommendationPlan.monthlyIncome) * 100)
+              : recommendationPlan.investPercent,
           retirementAge: profile?.retirement_age ?? 65,
           currentAge: profile?.current_age ?? 35,
           bigPurchaseName: goals?.big_purchase_name?.trim() || null,
@@ -175,17 +200,21 @@ export default function InvestmentsPanel({
           },
         }),
       });
-      const data = await res.json();
-      setRecommendation(data.recommendation || null);
+      const data = (await res.json()) as { recommendation?: string; error?: string };
+      if (res.status === 403 || data.error === "PRO_REQUIRED") {
+        setRecommendation(null);
+      } else {
+        setRecommendation(data.recommendation || null);
+      }
     } catch {
       setRecommendation("Could not load recommendations.");
     }
     setRecommendationLoading(false);
-  }, [budget, profile, goals, plan]);
+  }, [budget, profile, goals, recommendationPlan, isPro]);
 
   useEffect(() => {
-    if (!loading && userId && budget && plan) fetchRecommendations();
-  }, [loading, userId, budget, plan]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!loading && userId && budget && recommendationPlan && isPro) fetchRecommendations();
+  }, [loading, userId, budget, recommendationPlan, isPro, fetchRecommendations]);
 
   if (loading) {
     return (
@@ -196,44 +225,54 @@ export default function InvestmentsPanel({
   }
 
   const mainGridClass = showSuggestedMonthly
-    ? "grid gap-4 sm:gap-5 items-start sm:grid-cols-1 lg:grid-cols-2"
-    : "grid gap-4 sm:gap-5 items-start sm:grid-cols-1";
+    ? "grid items-start gap-6 sm:grid-cols-1 lg:grid-cols-2"
+    : "grid items-start gap-6 sm:grid-cols-1";
 
   return (
-    <div className="space-y-4" id="retirement-contributions">
+    <div className="space-y-6" id="retirement-contributions">
       <div className={mainGridClass}>
-        <div className="flex min-h-0 flex-col gap-2 overflow-auto rounded-3xl bg-gradient-to-br from-emerald-500 to-emerald-600 p-5 sm:p-6 text-white shadow-sm">
-          <h2 className="shrink-0 text-base font-semibold">AI recommendation</h2>
-          <p className="text-xs leading-relaxed text-emerald-100/95">
-            Based on your pay, retirement accounts, and goals.
-          </p>
-          {recommendationLoading ? (
-            <p className="mt-4 text-emerald-100">Loading...</p>
-          ) : recommendation ? (
-            <p className="mt-2 min-h-0 flex-1 overflow-auto text-sm leading-relaxed">
-              {recommendation}
-            </p>
+        {proReady ? (
+          isPro ? (
+            <div className="flex min-h-0 flex-col gap-3 overflow-auto rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-600 to-emerald-700 p-6 text-white shadow-[0_12px_40px_-20px_rgba(16,185,129,0.45)] sm:p-7">
+              <h3 className="shrink-0 text-[0.65rem] font-semibold uppercase tracking-wider text-emerald-100/90">
+                AI recommendation
+              </h3>
+              <p className="text-sm font-semibold leading-snug text-white">Personalized insight</p>
+              <p className="text-xs leading-relaxed text-emerald-100/90">
+                Based on your pay, retirement accounts, and goals.
+              </p>
+              {recommendationLoading ? (
+                <p className="mt-4 text-emerald-100">Loading...</p>
+              ) : recommendation ? (
+                <p className="mt-2 min-h-0 flex-1 overflow-auto text-sm leading-relaxed">
+                  {recommendation}
+                </p>
+              ) : (
+                <p className="mt-4 text-emerald-100">Add income to see advice.</p>
+              )}
+              <button
+                type="button"
+                onClick={fetchRecommendations}
+                disabled={recommendationLoading || !budget}
+                className="mt-2 min-h-[2.75rem] rounded-xl border border-white/20 bg-white/15 px-5 py-2.5 text-sm font-semibold backdrop-blur-sm transition-colors duration-150 hover:bg-white/25 disabled:opacity-50 motion-reduce:transition-none"
+              >
+                Refresh recommendation
+              </button>
+            </div>
           ) : (
-            <p className="mt-4 text-emerald-100">Add income to see advice.</p>
-          )}
-          <button
-            type="button"
-            onClick={fetchRecommendations}
-            disabled={recommendationLoading || !budget}
-            className="mt-3 min-h-[2.75rem] rounded-xl bg-white/20 px-5 py-2.5 text-sm font-semibold hover:bg-white/30 disabled:opacity-50"
-          >
-            Refresh recommendation
-          </button>
-        </div>
+            <ProFeatureTeaser title="AI allocation insight" surface="investments" />
+          )
+        ) : (
+          <div className={PRO_GATING_PLACEHOLDER_CLASS} aria-hidden />
+        )}
 
         {showSuggestedMonthly && (
-          <SuggestedMonthlyAmountsCard plan={plan} variant="investments" />
+          <SuggestedMonthlyAmountsCard plan={recommendationPlan} variant="investments" />
         )}
       </div>
 
-      <p className="text-xs text-slate-400 dark:text-slate-500">
-        This is an estimate for illustration only and is not financial advice. Actual outcomes will
-        vary.
+      <p className="text-xs leading-relaxed text-slate-500">
+        {TRUST_DISCLAIMER} Actual outcomes will vary.
       </p>
     </div>
   );

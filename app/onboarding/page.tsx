@@ -8,7 +8,7 @@ import IncomeBalanceForm from "@/components/onboarding/income-balance-form";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 
 /**
- * First-time users: multi-step `OnboardingWizard` until budget + payday exist.
+ * First-time users: 4-step `OnboardingWizard` (Income → Bills → Goals → Preferences) until budget + payday exist.
  * Returning users: `IncomeBalanceForm` (navbar “Income & balance”).
  */
 export default function OnboardingPage() {

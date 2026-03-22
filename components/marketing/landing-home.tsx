@@ -14,6 +14,8 @@ import {
 import { CountUpMoney } from "@/components/motion/count-up-money";
 import { EASE_OUT, fadeUpItem, staggerContainer } from "@/components/motion/overview-variants";
 import { formatMoney } from "@/lib/dashboard-data";
+import BalncedLogo from "@/components/brand/balnced-logo";
+import { TRUST_DATA_NOTE, TRUST_DISCLAIMER } from "@/lib/trust-copy";
 
 const DEMO_SAFE = 847.23;
 const DEMO_DAILY = 38.5;
@@ -202,9 +204,7 @@ export function LandingHome() {
           className="border-b border-white/[0.08] bg-slate-950/80 backdrop-blur-md"
         >
           <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
-            <Link href="/" className="text-xl font-bold tracking-tight text-slate-50 sm:text-2xl">
-              Balnced
-            </Link>
+            <BalncedLogo size="lg" href="/" />
             <div className="flex gap-2">
               <Link
                 href="/login"
@@ -366,6 +366,12 @@ export function LandingHome() {
             ))}
           </motion.div>
         </section>
+
+        <footer className="mx-auto max-w-6xl border-t border-white/[0.06] px-5 py-10 sm:px-6">
+          <p className="text-center text-[0.7rem] leading-relaxed text-slate-600">
+            {TRUST_DISCLAIMER} {TRUST_DATA_NOTE}
+          </p>
+        </footer>
       </div>
     </main>
   );

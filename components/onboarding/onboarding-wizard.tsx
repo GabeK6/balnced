@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { billPaidFields } from "@/lib/bill-paid-fields";
 import {
   getDaysUntil,
   getMonthlyPay,
@@ -16,13 +16,19 @@ import {
 } from "@/lib/dashboard-data";
 import { getSafeToSpendStatus } from "@/lib/financial-status";
 import { markOnboardingComplete } from "@/lib/onboarding-state";
+import {
+  clearOnboardingDraft,
+  loadOnboardingDraft,
+  saveOnboardingDraft,
+  type BillDraft,
+  type OnboardingDraftV1,
+} from "@/lib/onboarding-draft";
 import { EASE_OUT } from "@/components/motion/overview-variants";
+import BalncedLogo from "@/components/brand/balnced-logo";
 
-const STEPS = 5;
+const STEPS = 4;
 const inputClass = "balnced-input";
 const labelClass = "mb-1.5 block text-xs font-medium text-slate-400";
-
-type BillDraft = { id: string; name: string; amount: string; due: string };
 
 function newBillRow(): BillDraft {
   return { id: crypto.randomUUID(), name: "", amount: "", due: "" };
@@ -45,11 +51,43 @@ function buildRecommendation(
   return "You’re in solid shape—use your daily limit as a steady rhythm until payday.";
 }
 
+function draftFromState(args: {
+  step: number;
+  balance: string;
+  payType: "salary" | "hourly";
+  payFrequency: "weekly" | "biweekly" | "twice_monthly" | "monthly";
+  paycheck: string;
+  hourlyRate: string;
+  hoursWorked: string;
+  nextPayday: string;
+  billRows: BillDraft[];
+  goalName: string;
+  goalAmount: string;
+  savePercent: string;
+}): OnboardingDraftV1 {
+  return {
+    version: 1,
+    step: args.step,
+    balance: args.balance,
+    payType: args.payType,
+    payFrequency: args.payFrequency,
+    paycheck: args.paycheck,
+    hourlyRate: args.hourlyRate,
+    hoursWorked: args.hoursWorked,
+    nextPayday: args.nextPayday,
+    billRows: args.billRows,
+    goalName: args.goalName,
+    goalAmount: args.goalAmount,
+    savePercent: args.savePercent,
+  };
+}
+
 export function OnboardingWizard() {
   const reduce = useReducedMotion();
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  const [draftLoaded, setDraftLoaded] = useState(false);
 
   const [balance, setBalance] = useState("");
   const [payType, setPayType] = useState<"salary" | "hourly">("salary");
@@ -63,7 +101,7 @@ export function OnboardingWizard() {
   const [billRows, setBillRows] = useState<BillDraft[]>(() => [newBillRow()]);
   const [goalName, setGoalName] = useState("");
   const [goalAmount, setGoalAmount] = useState("");
-  const [goalMonthly, setGoalMonthly] = useState("");
+  const [savePercent, setSavePercent] = useState("");
 
   const [preview, setPreview] = useState<{
     safeToSpend: number;
@@ -72,6 +110,61 @@ export function OnboardingWizard() {
     status: ReturnType<typeof getSafeToSpendStatus>;
     recommendation: string;
   } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const d = loadOnboardingDraft(user.id);
+      if (d && !cancelled) {
+        setStep(Math.min(Math.max(0, d.step), STEPS - 1));
+        setBalance(d.balance);
+        setPayType(d.payType);
+        setPayFrequency(d.payFrequency);
+        setPaycheck(d.paycheck);
+        setHourlyRate(d.hourlyRate);
+        setHoursWorked(d.hoursWorked);
+        setNextPayday(d.nextPayday);
+        setBillRows(d.billRows?.length ? d.billRows : [newBillRow()]);
+        setGoalName(d.goalName);
+        setGoalAmount(d.goalAmount);
+        setSavePercent(d.savePercent);
+      }
+      setDraftLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function persistDraft(currentStep: number) {
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      saveOnboardingDraft(
+        user.id,
+        draftFromState({
+          step: currentStep,
+          balance,
+          payType,
+          payFrequency,
+          paycheck,
+          hourlyRate,
+          hoursWorked,
+          nextPayday,
+          billRows,
+          goalName,
+          goalAmount,
+          savePercent,
+        })
+      );
+    })();
+  }
 
   const paychecksPerYear = getPaychecksPerYear(payFrequency);
 
@@ -104,15 +197,14 @@ export function OnboardingWizard() {
   }
 
   function canContinue(s: number): boolean {
-    if (s === 0) return Number(balance) >= 0 && balance.trim() !== "";
-    if (s === 1) {
+    if (s === 0) {
+      if (balance.trim() === "" || Number.isNaN(Number(balance))) return false;
       if (payType === "salary") {
-        return effectivePaycheck > 0;
-      }
-      return calculatedHourlyPaycheck > 0;
+        if (effectivePaycheck <= 0) return false;
+      } else if (calculatedHourlyPaycheck <= 0) return false;
+      return nextPayday.trim() !== "";
     }
-    if (s === 2) return nextPayday.trim() !== "";
-    if (s === 3) {
+    if (s === 1) {
       const filled = billRows.filter((r) => r.name.trim() && r.amount && r.due);
       const anyPartial = billRows.some((r) => {
         const n = r.name.trim();
@@ -126,11 +218,66 @@ export function OnboardingWizard() {
       }
       return true;
     }
-    if (s === 4) {
-      if (!goalName.trim() && !goalAmount.trim() && !goalMonthly.trim()) return true;
+    if (s === 2) {
       return goalName.trim().length > 0 && Number(goalAmount) > 0;
     }
+    if (s === 3) {
+      if (!savePercent.trim()) return true;
+      const p = Number(savePercent);
+      return !Number.isNaN(p) && p >= 0 && p <= 100;
+    }
     return true;
+  }
+
+  async function persistBudgetRow(userId: string): Promise<boolean> {
+    const basePayload = {
+      user_id: userId,
+      balance: Number(balance),
+      pay_type: payType,
+      pay_frequency: payFrequency,
+      paycheck: effectivePaycheck,
+      hourly_rate: payType === "hourly" ? Number(hourlyRate || 0) : null,
+      hours_worked: payType === "hourly" ? Number(hoursWorked || 0) : null,
+      next_payday: nextPayday,
+    };
+
+    const existing = await supabase
+      .from("budgets")
+      .select("id")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const budgetSave = existing.data?.id
+      ? await supabase.from("budgets").update(basePayload).eq("id", existing.data.id).eq("user_id", userId)
+      : await supabase.from("budgets").insert(basePayload);
+
+    if (budgetSave.error) {
+      console.error(budgetSave.error);
+      alert(budgetSave.error.message || "Could not save income.");
+      return false;
+    }
+    return true;
+  }
+
+  async function handleContinueFromIncome() {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      window.location.href = "/login";
+      return;
+    }
+    setSaving(true);
+    try {
+      const ok = await persistBudgetRow(user.id);
+      if (!ok) return;
+      persistDraft(1);
+      setStep(1);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleFinish() {
@@ -144,34 +291,8 @@ export function OnboardingWizard() {
         return;
       }
 
-      const basePayload = {
-        user_id: user.id,
-        balance: Number(balance),
-        pay_type: payType,
-        pay_frequency: payFrequency,
-        paycheck: effectivePaycheck,
-        hourly_rate: payType === "hourly" ? Number(hourlyRate || 0) : null,
-        hours_worked: payType === "hourly" ? Number(hoursWorked || 0) : null,
-        next_payday: nextPayday,
-      };
-
-      const existing = await supabase
-        .from("budgets")
-        .select("id")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      const budgetSave = existing.data?.id
-        ? await supabase.from("budgets").update(basePayload).eq("id", existing.data.id).eq("user_id", user.id)
-        : await supabase.from("budgets").insert(basePayload);
-
-      if (budgetSave.error) {
-        console.error(budgetSave.error);
-        alert(budgetSave.error.message || "Could not save budget.");
-        return;
-      }
+      const okBudget = await persistBudgetRow(user.id);
+      if (!okBudget) return;
 
       const filledBills = billRows.filter((r) => r.name.trim() && r.amount && r.due);
       for (const r of filledBills) {
@@ -180,8 +301,8 @@ export function OnboardingWizard() {
           name: r.name.trim(),
           amount: Number(r.amount),
           due_date: r.due,
-          is_paid: false,
           archived: false,
+          ...billPaidFields(false),
         });
         if (error) {
           console.error(error);
@@ -189,6 +310,22 @@ export function OnboardingWizard() {
           return;
         }
       }
+
+      const sp = savePercent.trim() === "" ? 0 : Math.min(100, Math.max(0, Number(savePercent)));
+      const savePctRounded = Math.round(sp * 10) / 10;
+
+      saveUserGoals(user.id, {
+        retirement_age: 65,
+        savings_goals: [
+          {
+            id: "onboarding-1",
+            name: goalName.trim(),
+            amount: Number(goalAmount),
+            priority: 1,
+          },
+        ],
+        save_percent: savePctRounded > 0 ? savePctRounded : undefined,
+      });
 
       const mockBudget: Budget = {
         balance: Number(balance),
@@ -202,31 +339,10 @@ export function OnboardingWizard() {
 
       const billsTotal = filledBills.reduce((s, r) => s + Number(r.amount), 0);
       const monthlyPay = getMonthlyPay(mockBudget);
-      let savePercent = 0;
-      if (goalName.trim() && goalMonthly.trim() && monthlyPay > 0) {
-        const m = Number(goalMonthly);
-        if (m > 0) savePercent = Math.min(100, (m / monthlyPay) * 100);
-      }
-
-      if (goalName.trim() && Number(goalAmount) > 0) {
-        saveUserGoals(user.id, {
-          retirement_age: 65,
-          savings_goals: [
-            {
-              id: "onboarding-1",
-              name: goalName.trim(),
-              amount: Number(goalAmount),
-              priority: 1,
-            },
-          ],
-          save_percent: savePercent > 0 ? Math.round(savePercent * 10) / 10 : undefined,
-        });
-      }
-
-      const currentBalance = Number(balance);
-      const monthlySavings = monthlyPay > 0 && savePercent > 0 ? monthlyPay * (savePercent / 100) : 0;
+      const monthlySavings =
+        monthlyPay > 0 && savePctRounded > 0 ? monthlyPay * (savePctRounded / 100) : 0;
       const goalsToSubtract = monthlySavings;
-      const safeToSpend = Math.max(0, currentBalance - billsTotal - goalsToSubtract);
+      const safeToSpend = Math.max(0, Number(balance) - billsTotal - goalsToSubtract);
       const daysUntilPayday = getDaysUntil(nextPayday);
       const dailyLimit = daysUntilPayday > 0 ? safeToSpend / daysUntilPayday : safeToSpend;
       const status = getSafeToSpendStatus(safeToSpend, dailyLimit, daysUntilPayday);
@@ -240,6 +356,7 @@ export function OnboardingWizard() {
       });
 
       markOnboardingComplete(user.id);
+      clearOnboardingDraft(user.id);
       setDone(true);
     } finally {
       setSaving(false);
@@ -248,13 +365,28 @@ export function OnboardingWizard() {
 
   const progress = done ? STEPS : step + 1;
 
+  if (!draftLoaded) {
+    return (
+      <main className="min-h-screen bg-slate-950 px-4 py-10">
+        <div className="mx-auto max-w-md">
+          <div className="balnced-panel rounded-3xl p-6">
+            <p className="text-sm text-slate-400">Loading…</p>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-slate-950 px-4 py-10 text-slate-100 sm:px-6 sm:py-14">
       <div className="mx-auto max-w-lg">
         <div className="mb-8 flex items-center justify-between gap-4">
-          <Link href="/" className="text-sm font-medium text-slate-400 hover:text-emerald-400">
-            Balnced
-          </Link>
+          <BalncedLogo
+            size="sm"
+            href="/"
+            className="group transition-opacity hover:opacity-100"
+            wordmarkClassName="text-slate-400 transition-colors group-hover:text-emerald-400"
+          />
           {!done && (
             <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
               Step {Math.min(step + 1, STEPS)} of {STEPS}
@@ -328,7 +460,7 @@ export function OnboardingWizard() {
                     href="/dashboard"
                     className="inline-flex min-h-[2.75rem] flex-1 items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-center text-sm font-semibold text-white shadow-[0_12px_32px_-10px_rgba(5,150,105,0.4)] transition hover:bg-emerald-500 sm:flex-none"
                   >
-                    Go to dashboard
+                    Go to Overview
                   </a>
                   <a
                     href="/bills"
@@ -348,32 +480,27 @@ export function OnboardingWizard() {
               >
                 {step === 0 && (
                   <>
-                    <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Welcome to Balnced</h1>
+                    <p className="text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-emerald-500/90">
+                      Step 1 · Income
+                    </p>
+                    <h1 className="mt-1 text-xl font-bold tracking-tight sm:text-2xl">How you earn &amp; when you get paid</h1>
                     <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                      Let&apos;s start with what&apos;s in your checking today (after any pending charges you care
-                      about).
+                      About a minute—balance, paycheck, and next payday so we can pace spending.
                     </p>
-                    <div className="mt-6">
-                      <label className={labelClass}>Current balance</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={balance}
-                        onChange={(e) => setBalance(e.target.value)}
-                        placeholder="e.g. 2400"
-                        className={inputClass}
-                      />
-                    </div>
-                  </>
-                )}
 
-                {step === 1 && (
-                  <>
-                    <h1 className="text-xl font-bold tracking-tight sm:text-2xl">How you get paid</h1>
-                    <p className="mt-2 text-sm text-slate-400">
-                      We use this for safe-to-spend pacing and projections.
-                    </p>
-                    <div className="mt-6 space-y-5">
+                    <div className="mt-6 space-y-6">
+                      <div>
+                        <label className={labelClass}>Current checking balance</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={balance}
+                          onChange={(e) => setBalance(e.target.value)}
+                          placeholder="e.g. 2400"
+                          className={inputClass}
+                        />
+                      </div>
+
                       <div>
                         <label className={labelClass}>Pay type</label>
                         <div className="flex gap-2">
@@ -401,6 +528,7 @@ export function OnboardingWizard() {
                           </button>
                         </div>
                       </div>
+
                       <div>
                         <label className={labelClass}>Pay frequency</label>
                         <select
@@ -418,10 +546,11 @@ export function OnboardingWizard() {
                           <option value="monthly">Monthly</option>
                         </select>
                       </div>
+
                       {payType === "salary" ? (
                         <>
                           <div>
-                            <label className={labelClass}>Amount per paycheck (take-home)</label>
+                            <label className={labelClass}>Take-home per paycheck</label>
                             <input
                               type="number"
                               step="0.01"
@@ -433,7 +562,7 @@ export function OnboardingWizard() {
                             />
                           </div>
                           <div>
-                            <label className={labelClass}>Or set annual take-home (optional)</label>
+                            <label className={labelClass}>Or annual take-home (optional)</label>
                             <input
                               type="number"
                               step="1"
@@ -477,44 +606,40 @@ export function OnboardingWizard() {
                           </p>
                         </>
                       )}
+
+                      <div>
+                        <label className={labelClass}>Next payday</label>
+                        <input
+                          type="date"
+                          value={nextPayday}
+                          onChange={(e) => setNextPayday(e.target.value)}
+                          className={inputClass}
+                        />
+                        {upcomingPaydaysPreview.length > 0 && (
+                          <p className="mt-2 text-xs text-slate-500">
+                            Then roughly:{" "}
+                            {upcomingPaydaysPreview
+                              .slice(1)
+                              .map((d) => formatDate(d))
+                              .join(" · ")}
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </>
                 )}
 
-                {step === 2 && (
+                {step === 1 && (
                   <>
-                    <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Next payday</h1>
-                    <p className="mt-2 text-sm text-slate-400">We&apos;ll pace spending until this date.</p>
-                    <div className="mt-6">
-                      <label className={labelClass}>Next payday</label>
-                      <input
-                        type="date"
-                        value={nextPayday}
-                        onChange={(e) => setNextPayday(e.target.value)}
-                        className={inputClass}
-                      />
-                      {upcomingPaydaysPreview.length > 0 && (
-                        <p className="mt-2 text-xs text-slate-500">
-                          Then roughly:{" "}
-                          {upcomingPaydaysPreview
-                            .slice(1)
-                            .map((d) => formatDate(d))
-                            .join(" · ")}
-                        </p>
-                      )}
-                    </div>
-                  </>
-                )}
-
-                {step === 3 && (
-                  <>
-                    <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Recurring bills</h1>
+                    <p className="text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-emerald-500/90">
+                      Step 2 · Bills
+                    </p>
+                    <h1 className="mt-1 text-xl font-bold tracking-tight sm:text-2xl">Recurring bills</h1>
                     <p className="mt-2 text-sm text-slate-400">
-                      Add what&apos;s due before your next payday—or skip if you&apos;ll add them later. Due dates
-                      should be on or before your next payday.
+                      Add what&apos;s due before your next payday—or leave rows empty and add later.
                     </p>
                     <div className="mt-6 space-y-4">
-                      {billRows.map((row, i) => (
+                      {billRows.map((row) => (
                         <div key={row.id} className="balnced-row rounded-2xl p-4">
                           <div className="grid gap-3 sm:grid-cols-3">
                             <div className="sm:col-span-1">
@@ -584,11 +709,14 @@ export function OnboardingWizard() {
                   </>
                 )}
 
-                {step === 4 && (
+                {step === 2 && (
                   <>
-                    <h1 className="text-xl font-bold tracking-tight sm:text-2xl">First goal (optional)</h1>
+                    <p className="text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-emerald-500/90">
+                      Step 3 · Goals
+                    </p>
+                    <h1 className="mt-1 text-xl font-bold tracking-tight sm:text-2xl">Your first savings goal</h1>
                     <p className="mt-2 text-sm text-slate-400">
-                      Saving for something? Add a target—or skip and set this up on the Goals tab later.
+                      Balnced uses goals to prioritize savings. Add one to continue—you can add more later.
                     </p>
                     <div className="mt-6 space-y-4">
                       <div>
@@ -612,22 +740,34 @@ export function OnboardingWizard() {
                           className={inputClass}
                         />
                       </div>
-                      <div>
-                        <label className={labelClass}>Rough monthly contribution (optional)</label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={goalMonthly}
-                          onChange={(e) => setGoalMonthly(e.target.value)}
-                          placeholder="Reduces safe-to-spend like your Goals save %"
-                          className={inputClass}
-                        />
-                        <p className="mt-1 text-xs text-slate-500">
-                          If set, we&apos;ll allocate that much from monthly take-home toward the goal in your
-                          overview math.
-                        </p>
-                      </div>
+                    </div>
+                  </>
+                )}
+
+                {step === 3 && (
+                  <>
+                    <p className="text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-emerald-500/90">
+                      Step 4 · Preferences
+                    </p>
+                    <h1 className="mt-1 text-xl font-bold tracking-tight sm:text-2xl">Savings rate (optional)</h1>
+                    <p className="mt-2 text-sm text-slate-400">
+                      Roughly what percent of take-home do you want to allocate toward savings goals? You can change this anytime.
+                    </p>
+                    <div className="mt-6">
+                      <label className={labelClass}>Save % of monthly take-home</label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="0"
+                        max="100"
+                        value={savePercent}
+                        onChange={(e) => setSavePercent(e.target.value)}
+                        placeholder="e.g. 10 (leave empty for 0)"
+                        className={inputClass}
+                      />
+                      <p className="mt-2 text-xs text-slate-500">
+                        This reduces &quot;safe to spend&quot; the same way as the Goals page.
+                      </p>
                     </div>
                   </>
                 )}
@@ -636,7 +776,11 @@ export function OnboardingWizard() {
                   {step > 0 && (
                     <button
                       type="button"
-                      onClick={() => setStep((s) => Math.max(0, s - 1))}
+                      onClick={() => {
+                        const ns = Math.max(0, step - 1);
+                        setStep(ns);
+                        persistDraft(ns);
+                      }}
                       className="min-h-[2.75rem] rounded-xl border border-white/10 bg-white/[0.04] px-5 py-2.5 text-sm font-medium text-slate-200 hover:bg-white/[0.07]"
                     >
                       Back
@@ -646,11 +790,19 @@ export function OnboardingWizard() {
                     {step < STEPS - 1 ? (
                       <button
                         type="button"
-                        disabled={!canContinue(step)}
-                        onClick={() => setStep((s) => s + 1)}
+                        disabled={!canContinue(step) || saving}
+                        onClick={() => {
+                          if (step === 0) {
+                            void handleContinueFromIncome();
+                            return;
+                          }
+                          if (!canContinue(step)) return;
+                          persistDraft(step + 1);
+                          setStep((s) => s + 1);
+                        }}
                         className="min-h-[2.75rem] rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45"
                       >
-                        Continue
+                        {step === 0 && saving ? "Saving…" : "Continue"}
                       </button>
                     ) : (
                       <button
@@ -670,7 +822,7 @@ export function OnboardingWizard() {
         </div>
 
         <p className="mt-6 text-center text-xs text-slate-600">
-          You can change everything later under Income &amp; balance or Bills.
+          You can edit everything later in Income &amp; balance, Bills, and Goals.
         </p>
       </div>
     </main>
