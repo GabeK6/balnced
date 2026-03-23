@@ -165,22 +165,32 @@ export default function SignupPage() {
           </p>
         ) : null}
 
-        <div className="mt-8 flex flex-col gap-3 border-t border-white/[0.08] pt-8 text-center text-sm sm:flex-row sm:items-center sm:justify-center sm:gap-6 sm:text-left">
-          <a
-            href="/"
-            className="font-medium text-emerald-400 transition hover:text-emerald-300"
-          >
-            Back to home
-          </a>
-          <span className="hidden text-slate-600 sm:inline" aria-hidden>
-            ·
-          </span>
-          <a
-            href="/login"
-            className="font-medium text-slate-300 transition hover:text-white"
-          >
-            Log in
-          </a>
+        <div className="mt-8 border-t border-white/[0.08] pt-8 text-sm">
+          {/* Dot is in the center column so it stays on the card’s horizontal center */}
+          <div className="flex flex-col items-center gap-2 sm:grid sm:grid-cols-[1fr_auto_1fr] sm:items-center sm:gap-x-0">
+            <div className="flex w-full justify-center sm:justify-end sm:pr-3">
+              <a
+                href="/"
+                className="font-medium text-emerald-400 transition hover:text-emerald-300"
+              >
+                Back to home
+              </a>
+            </div>
+            <span
+              className="select-none px-2 text-slate-500 sm:px-0"
+              aria-hidden
+            >
+              ·
+            </span>
+            <div className="flex w-full justify-center sm:justify-start sm:pl-3">
+              <a
+                href="/login"
+                className="font-medium text-slate-300 transition hover:text-white"
+              >
+                Log in
+              </a>
+            </div>
+          </div>
         </div>
         <p className="mt-6 text-center text-[0.65rem] leading-relaxed text-slate-600">
           {TRUST_DISCLAIMER}

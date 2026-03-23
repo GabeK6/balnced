@@ -2,6 +2,32 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PlanTier } from "@/lib/plan";
 import { parsePlanTier } from "@/lib/plan";
 
+/**
+ * Pro access & `public.user_plans` semantics
+ * ============================================
+ *
+ * **Feature gating:** `computeProAccessFromRow` → `PlanAccessState.hasProAccess`.
+ * **Client UI:** `useUserPlan().hasProAccess` (with `loading`). Do not use `loadDashboardData().hasProAccess`
+ * for long-lived Pro gating — that snapshot is for server/data loaders only (`lib/dashboard-data.ts`).
+ *
+ * ### `plan` + `subscription_status` (reference)
+ *
+ * - **free + trialing** (with `trial_ends_at` in the future): active trial → **Pro features** (trial path).
+ * - **free + inactive** (or other): no active trial window → **no** Pro features.
+ * - **pro + active**: Stripe subscription current → **yes**.
+ * - **pro + past_due**: Stripe grace / failed payment period → **yes** (same gate as active).
+ * - **pro + inactive**: manual/comped Pro, or Stripe not wired yet → **yes**.
+ * - **pro + canceled**: subscription ended → **no** Pro features.
+ * - **pro + trialing** (rare): still **yes** unless `canceled`.
+ *
+ * ### Debug logging
+ * Set `NEXT_PUBLIC_DEBUG_PLAN_ACCESS=1` — logs go through `debugPlanAccess` (prefix `[balnced-plan]`).
+ *
+ * ### Future: optional `access_source`
+ * To distinguish Stripe vs manual vs comp in analytics or copy, add a nullable column; keep
+ * `computeProAccessFromRow` as the single feature gate.
+ */
+
 /** Mirrors `public.user_plans.subscription_status` check constraint. */
 export type SubscriptionStatus =
   | "inactive"
@@ -44,8 +70,8 @@ export function parseSubscriptionStatus(raw: unknown): SubscriptionStatus {
 }
 
 /**
- * Server and client: Pro feature access from a user_plans row.
- * Call `ensure_user_plan` RPC first so trialing rows past trial_ends_at are expired.
+ * Whether the user may use Pro-only features. See module doc above for `plan` / `subscription_status` meanings.
+ * Call `ensure_user_plan` RPC before reading the row so expired trials are updated.
  */
 export function computeProAccessFromRow(
   row: Record<string, unknown> | null | undefined,
@@ -63,7 +89,7 @@ export function computeProAccessFromRow(
   if (status === "trialing" && Number.isFinite(trialEndMs) && trialEndMs > nowMs) {
     return true;
   }
-  if (plan === "pro" && (status === "active" || status === "past_due")) {
+  if (plan === "pro" && status !== "canceled") {
     return true;
   }
   return false;
@@ -114,6 +140,16 @@ function isPlanAccessDebugEnabled(): boolean {
     typeof process !== "undefined" &&
     process.env.NEXT_PUBLIC_DEBUG_PLAN_ACCESS === "1"
   );
+}
+
+/** Structured debug logs only when `NEXT_PUBLIC_DEBUG_PLAN_ACCESS=1`. */
+function debugPlanAccess(message: string, payload?: Record<string, unknown>): void {
+  if (!isPlanAccessDebugEnabled()) return;
+  if (payload != null && Object.keys(payload).length > 0) {
+    console.warn(`[balnced-plan] ${message}`, payload);
+  } else {
+    console.warn(`[balnced-plan] ${message}`);
+  }
 }
 
 /** Use warn (not error) so Next.js dev overlay does not treat recoverable plan fetch issues as fatal. */
@@ -271,11 +307,13 @@ export function trialEndHeadlineForModal(planAccess: PlanAccessState | null): st
   return "Your free trial is active";
 }
 
-/** Settings / account summary: Free trial, Paid Pro, Free, or trial expired. */
+/** Settings / account summary: Free trial, Paid Pro, Pro (manual), Free, or trial expired. */
 export function getPlanAccountStatusLabel(planAccess: PlanAccessState | null): string {
   if (!planAccess) return "Free";
   if (isTrialWindowActive(planAccess)) return "Free trial";
-  if (isPaidProAccount(planAccess)) return "Paid Pro";
+  if (planAccess.plan === "pro" && planAccess.hasProAccess) {
+    return isPaidProAccount(planAccess) ? "Paid Pro" : "Pro";
+  }
   if (planAccess.trialExpiredWithoutSubscription) return "Free · trial expired";
   return "Free";
 }
@@ -289,20 +327,9 @@ export async function fetchUserPlanAccess(
   } = await supabase.auth.getUser();
   if (!user) return null;
 
-  const debug = isPlanAccessDebugEnabled();
-  if (debug) {
-    console.warn("[balnced] fetchUserPlanAccess: auth user id =", user.id);
-  }
-
   const { error: rpcErr } = await supabase.rpc("ensure_user_plan");
   if (rpcErr) {
     logPlanAccessWarning("ensure_user_plan RPC", rpcErr);
-  }
-  if (debug) {
-    console.warn(
-      "[balnced] ensure_user_plan:",
-      rpcErr ? `failed (${formatPostgrestError(rpcErr)})` : "ok (void)"
-    );
   }
 
   const { data, error } = await supabase
@@ -313,29 +340,38 @@ export async function fetchUserPlanAccess(
     .eq("user_id", user.id)
     .maybeSingle();
 
+  const now = Date.now();
+
   if (error) {
     logPlanAccessWarning("user_plans select", error);
-    if (debug) {
-      console.warn(
-        "[balnced] user_plans select failed:",
-        formatPostgrestError(error),
-        "user_id =",
-        user.id
-      );
-    }
-    return rowToPlanAccessState(null, Date.now());
+    const state = rowToPlanAccessState(null, now);
+    debugPlanAccess("fetchUserPlanAccess", {
+      userId: user.id,
+      userPlansSelectError: formatPostgrestError(error),
+      hasProAccess: state.hasProAccess,
+      plan: state.plan,
+    });
+    return state;
   }
 
-  if (debug) {
-    console.warn(
-      "[balnced] user_plans select:",
-      data ? "ok (row)" : "ok (no row)",
-      data ? { plan: data.plan, subscription_status: data.subscription_status } : null
-    );
+  const state = rowToPlanAccessState((data ?? null) as Record<string, unknown> | null, now);
+
+  debugPlanAccess("fetchUserPlanAccess", {
+    userId: user.id,
+    ensureUserPlanError: rpcErr ? formatPostgrestError(rpcErr) : null,
+    row: data
+      ? { plan: data.plan, subscription_status: data.subscription_status }
+      : null,
+    hasProAccess: state.hasProAccess,
+    plan: state.plan,
+    subscriptionStatus: state.subscriptionStatus,
+  });
+
+  if (data && parsePlanTier(data.plan) === "pro" && !state.hasProAccess) {
+    debugPlanAccess("WARNING: plan=pro but hasProAccess=false (expected only if subscription_status is canceled)", {
+      subscriptionStatus: state.subscriptionStatus,
+    });
   }
 
-  return rowToPlanAccessState(
-    (data ?? null) as Record<string, unknown> | null,
-    Date.now()
-  );
+  return state;
 }

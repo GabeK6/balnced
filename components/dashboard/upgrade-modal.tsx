@@ -12,6 +12,7 @@ import {
   trialEndHeadlineForModal,
   type PlanAccessState,
 } from "@/lib/plan-access";
+import { createCheckoutSessionForPro } from "@/lib/stripe-checkout-client";
 
 type Props = {
   open: boolean;
@@ -38,6 +39,8 @@ export default function UpgradeModal({
   onRefresh,
 }: Props) {
   const [mounted, setMounted] = useState(false);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -67,6 +70,21 @@ export default function UpgradeModal({
   }, [open, onRefresh]);
 
   if (!open || !mounted) return null;
+
+  async function startStripeCheckout() {
+    setCheckoutError(null);
+    setCheckoutLoading(true);
+    try {
+      const result = await createCheckoutSessionForPro();
+      if (!result.ok) {
+        setCheckoutError(result.error);
+        return;
+      }
+      window.location.assign(result.url);
+    } finally {
+      setCheckoutLoading(false);
+    }
+  }
 
   const trialEndLabel = formatTrialEnd(planAccess?.trialEndsAt ?? null);
   const trialHeadline = !loadingPlan && planAccess ? trialEndHeadlineForModal(planAccess) : null;
@@ -164,6 +182,12 @@ export default function UpgradeModal({
         </p>
         <p className="mt-2 text-[10px] leading-relaxed text-slate-600">{TRUST_DISCLAIMER}</p>
 
+        {checkoutError ? (
+          <p className="mt-4 text-sm text-rose-300" role="alert">
+            {checkoutError}
+          </p>
+        ) : null}
+
         <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
           <button
             type="button"
@@ -174,19 +198,28 @@ export default function UpgradeModal({
           </button>
           {paidPro ? (
             <Link
-              href="/settings"
+              href="/settings/subscription"
               className="inline-flex w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 sm:w-auto"
               onClick={onClose}
             >
-              Billing & settings
+              Subscription
             </Link>
+          ) : needsSubscribe ? (
+            <button
+              type="button"
+              onClick={() => void startStripeCheckout()}
+              disabled={checkoutLoading}
+              className="inline-flex w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+            >
+              {checkoutLoading ? "Redirecting…" : "Upgrade to Pro"}
+            </button>
           ) : (
             <Link
-              href="/settings"
+              href="/settings/subscription"
               className="inline-flex w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 sm:w-auto"
               onClick={onClose}
             >
-              Subscribe to Pro
+              View subscription
             </Link>
           )}
         </div>

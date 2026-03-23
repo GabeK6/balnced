@@ -162,6 +162,7 @@ export default function Navbar() {
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const trialBadge = !planLoading ? navTrialBadgeText(planAccess) : null;
   const showSubscribeCta = !planLoading && shouldShowSubscribeCta(planAccess);
+  /** Paid Pro chip: `plan === "pro"` + `hasProAccess`. Trial users get `trialBadge` instead (`plan` stays free). */
   const showProBadge = !planLoading && hasProAccess && plan === "pro";
   const showPlanBadges =
     Boolean(trialBadge) || showSubscribeCta || showProBadge;
@@ -228,7 +229,7 @@ export default function Navbar() {
             <div
               className="flex h-9 max-w-[min(100vw-8rem,24rem)] items-center gap-1.5 rounded-2xl border border-white/[0.06] bg-slate-900/40 px-2 py-0.5 backdrop-blur-sm sm:h-10 sm:max-w-none sm:gap-2 sm:px-2.5 md:px-3"
               role="group"
-              aria-label="Account and plan"
+              aria-label="Wallet, plan status, and account menu"
             >
               <Link
                 href="/onboarding"
@@ -275,12 +276,15 @@ export default function Navbar() {
                       onClick={() => setUpgradeOpen(true)}
                       className="shrink-0 rounded-full border border-emerald-500/18 bg-emerald-500/[0.06] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200/85 transition hover:border-emerald-500/30 hover:bg-emerald-500/10"
                     >
-                      {planAccess?.trialExpiredWithoutSubscription ? "Subscribe" : "Pro"}
+                      {planAccess?.trialExpiredWithoutSubscription ? "Subscribe" : "Upgrade"}
                     </button>
                   ) : null}
 
                   {showProBadge ? (
-                    <span className="shrink-0 rounded-full border border-emerald-500/18 bg-emerald-500/[0.06] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-100/80">
+                    <span
+                      className="shrink-0 rounded-full border border-emerald-500/18 bg-emerald-500/[0.06] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-100/80"
+                      title="Paid Pro — see Subscription in the account menu for details"
+                    >
                       Pro
                     </span>
                   ) : null}
@@ -299,10 +303,10 @@ export default function Navbar() {
                   {userInitial || "?"}
                 </button>
 
-                <div className="invisible absolute right-0 top-full z-50 mt-2 w-60 rounded-2xl border border-white/10 bg-slate-950/95 p-2.5 opacity-0 shadow-[0_16px_48px_-12px_rgba(0,0,0,0.55)] backdrop-blur-lg transition-all duration-150 group-hover:visible group-hover:opacity-100">
-                  <div className="px-3 py-2.5">
-                    <p className="text-[0.65rem] font-semibold uppercase tracking-wider text-slate-400">
-                      Settings
+                <div className="invisible absolute right-0 top-full z-50 mt-2 w-60 rounded-2xl border border-white/10 bg-slate-950/95 p-2 opacity-0 shadow-[0_16px_48px_-12px_rgba(0,0,0,0.55)] backdrop-blur-lg transition-all duration-150 group-hover:visible group-hover:opacity-100">
+                  <div className="px-1.5 pb-1 pt-0.5">
+                    <p className="px-2.5 pb-2 pt-1 text-[0.65rem] font-semibold uppercase tracking-wider text-slate-500">
+                      Account
                     </p>
                   </div>
 
@@ -318,6 +322,13 @@ export default function Navbar() {
                     className="block rounded-lg px-3 py-2.5 text-sm text-slate-200 transition-colors hover:bg-white/10"
                   >
                     Income & balance
+                  </Link>
+
+                  <Link
+                    href="/settings/subscription"
+                    className="block rounded-lg px-3 py-2.5 text-sm text-slate-200 transition-colors hover:bg-white/10"
+                  >
+                    Subscription
                   </Link>
 
                   <div className="my-2 border-t border-white/10" />

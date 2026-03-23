@@ -1,19 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import type { User } from "@supabase/supabase-js";
 import DashboardShell from "@/components/dashboard/shell";
 import { supabase } from "@/lib/supabase";
-import { useUserPlan } from "@/hooks/use-user-plan";
-import UpgradeModal from "@/components/dashboard/upgrade-modal";
-import { PRO_MONTHLY_LABEL } from "@/lib/plan";
-import {
-  formatTrialRemainingShort,
-  getPlanAccountStatusLabel,
-  isTrialWindowActive,
-  shouldShowSubscribeCta,
-} from "@/lib/plan-access";
-import { UPGRADE_CONTEXT_HEADLINE } from "@/lib/upgrade-prompt";
 
 function displayNameFromUser(user: User | null): string {
   const m = user?.user_metadata;
@@ -39,9 +30,6 @@ export default function UserSettingsPage() {
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
-  const { loading: planLoading, planAccess, refresh } = useUserPlan();
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
-
   useEffect(() => {
     async function load() {
       const {
@@ -135,49 +123,13 @@ export default function UserSettingsPage() {
       compact
     >
       <div className="balnced-panel mx-auto max-w-lg rounded-2xl p-6 sm:p-8">
-        <div className="mb-6 rounded-xl border border-white/[0.08] bg-slate-900/35 p-4">
-          <p className="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-slate-500">
-            Plan
-          </p>
-          <p className="mt-1.5 text-sm font-medium text-slate-200">
-            {planLoading ? "…" : getPlanAccountStatusLabel(planAccess)}
-          </p>
-          {!planLoading && planAccess && isTrialWindowActive(planAccess) && planAccess.trialEndsAt ? (
-            <p className="mt-1 text-xs text-amber-200/90">
-              Trial ends{" "}
-              {new Date(planAccess.trialEndsAt).toLocaleString(undefined, {
-                dateStyle: "medium",
-                timeStyle: "short",
-              })}
-              {` · ${formatTrialRemainingShort(planAccess)}`}
-            </p>
-          ) : null}
-          <p className="mt-1 text-xs leading-relaxed text-slate-500">{UPGRADE_CONTEXT_HEADLINE}</p>
-          <p className="mt-1 text-xs leading-relaxed text-slate-500">
-            Pro adds Copilot, projections, goal simulations, and deeper insights — {PRO_MONTHLY_LABEL} at
-            launch.
-          </p>
-          <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
-            Subscription billing is powered by Stripe (checkout link from this screen once enabled).
-          </p>
-          {!planLoading && shouldShowSubscribeCta(planAccess) ? (
-            <button
-              type="button"
-              onClick={() => setUpgradeOpen(true)}
-              className="mt-3 text-sm font-medium text-violet-400 transition hover:text-violet-300"
-            >
-              {planAccess?.trialExpiredWithoutSubscription ? "Subscribe to Pro" : "View Pro features"}
-            </button>
-          ) : null}
-        </div>
-
-        <UpgradeModal
-          open={upgradeOpen}
-          onClose={() => setUpgradeOpen(false)}
-          planAccess={planAccess}
-          loadingPlan={planLoading}
-          onRefresh={refresh}
-        />
+        <p className="mb-6 text-sm text-slate-500">
+          Manage your name and contact info. For plan and billing, go to{" "}
+          <Link href="/settings/subscription" className="font-medium text-emerald-400 hover:text-emerald-300">
+            Subscription
+          </Link>
+          .
+        </p>
 
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>

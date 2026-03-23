@@ -7,6 +7,11 @@ export type AuthBrandedPanelProps = {
   features: readonly string[];
   mobileHeadline: string;
   mobileSupporting: string;
+  /**
+   * `split` — two-column auth layout (desktop).
+   * `backdrop` — single full marketing block for centered login (decorative background).
+   */
+  mode?: "split" | "backdrop";
 };
 
 function FeatureBullet({ children }: { children: string }) {
@@ -33,13 +38,60 @@ function FeatureBullet({ children }: { children: string }) {
   );
 }
 
+function BrandedMarketingBlock({
+  headline,
+  supporting,
+  features,
+  logoHref,
+}: {
+  headline: string;
+  supporting: string;
+  features: readonly string[];
+  logoHref: "/" | null;
+}) {
+  return (
+    <>
+      <BalncedLogo size="lg" href={logoHref} />
+      <p className="balnced-eyebrow mt-8">Balnced</p>
+      <p className="mt-3 text-3xl font-bold tracking-tight text-slate-50 sm:text-4xl xl:text-[2.35rem] xl:leading-[1.15]">
+        {headline}
+      </p>
+      <p className="balnced-text-muted mt-4 max-w-md text-base leading-relaxed sm:text-lg">
+        {supporting}
+      </p>
+      <ul className="mt-8 space-y-3.5">
+        {features.map((line) => (
+          <FeatureBullet key={line}>{line}</FeatureBullet>
+        ))}
+      </ul>
+      <div className="mt-10">
+        <AuthDashboardPreview />
+      </div>
+    </>
+  );
+}
+
 export function AuthBrandedPanel({
   headline,
   supporting,
   features,
   mobileHeadline,
   mobileSupporting,
+  mode = "split",
 }: AuthBrandedPanelProps) {
+  if (mode === "backdrop") {
+    return (
+      <div className="w-full max-w-xl sm:max-w-2xl">
+        <BrandedMarketingBlock
+          headline={headline}
+          supporting={supporting}
+          features={features}
+          logoHref={null}
+        />
+      </div>
+    );
+  }
+
   return (
     <>
       <div
@@ -48,22 +100,12 @@ export function AuthBrandedPanel({
       />
       <div className="relative mx-auto w-full max-w-lg lg:mx-0">
         <div className="hidden lg:block">
-          <BalncedLogo size="lg" href="/" />
-          <p className="balnced-eyebrow mt-8">Balnced</p>
-          <p className="mt-3 text-3xl font-bold tracking-tight text-slate-50 sm:text-4xl xl:text-[2.35rem] xl:leading-[1.15]">
-            {headline}
-          </p>
-          <p className="balnced-text-muted mt-4 max-w-md text-base leading-relaxed sm:text-lg">
-            {supporting}
-          </p>
-          <ul className="mt-8 space-y-3.5">
-            {features.map((line) => (
-              <FeatureBullet key={line}>{line}</FeatureBullet>
-            ))}
-          </ul>
-          <div className="mt-10">
-            <AuthDashboardPreview />
-          </div>
+          <BrandedMarketingBlock
+            headline={headline}
+            supporting={supporting}
+            features={features}
+            logoHref="/"
+          />
         </div>
 
         <div className="lg:hidden">
